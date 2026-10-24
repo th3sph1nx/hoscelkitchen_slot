@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { Booking, FacilityId, CurrentStatus, BlacklistEntry, CooldownEntry, ADMIN_ROLL } from './types';
 import { getSupabaseServerClient } from './supabase';
 import { sendOtpEmail } from './email';
@@ -62,9 +63,38 @@ export function validateRollNumber(input: string): { isValid: boolean; roll: str
 }
 
 /**
+ * Generate HMAC signature for stateless serverless OTP verification
+ */
+export function createOtpSignature(roll: string, code: string, expiry: number): string {
+  const secret = process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'nitpy-ganga-auth-secret';
+  const data = `${roll.toUpperCase()}:${code.trim()}:${expiry}`;
+  const hmac = crypto.createHmac('sha256', secret).update(data).digest('hex');
+  return `${expiry}.${hmac}`;
+}
+
+export function verifyOtpSignature(roll: string, code: string, ticket: string): boolean {
+  try {
+    const parts = ticket.split('.');
+    if (parts.length !== 2) return false;
+    const [expiryStr, hmac] = parts;
+    const expiry = parseInt(expiryStr, 10);
+    if (isNaN(expiry) || Date.now() > expiry) return false;
+
+    const secret = process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'nitpy-ganga-auth-secret';
+    const data = `${roll.toUpperCase()}:${code.trim()}:${expiry}`;
+    const expected = crypto.createHmac('sha256', secret).update(data).digest('hex');
+    return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expected));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Generate 6-digit OTP and store with 10-minute validity
  */
-export async function generateAndSendOtp(rollNumber: string): Promise<{ success: boolean; email: string; devOtp?: string }> {
+export async function generateAndSendOtp(
+  rollNumber: string
+): Promise<{ success: boolean; email: string; devOtp?: string; ticket: string; sentVia?: string }> {
   const validation = validateRollNumber(rollNumber);
   if (!validation.isValid) {
     throw new Error(validation.error);
@@ -75,19 +105,33 @@ export async function generateAndSendOtp(rollNumber: string): Promise<{ success:
   const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
 
   global.__memoryOtps?.set(roll, { code, expiresAt, email });
+  const ticket = createOtpSignature(roll, code, expiresAt);
 
   const dispatch = await sendOtpEmail({ email, rollNumber: roll, code });
-  return { success: true, email, devOtp: dispatch.devOtp };
+  return {
+    success: true,
+    email,
+    devOtp: dispatch.devOtp,
+    ticket,
+    sentVia: dispatch.sentVia,
+  };
 }
 
 /**
  * Verify OTP
  */
-export async function verifyOtp(rollNumber: string, inputCode: string): Promise<boolean> {
+export async function verifyOtp(rollNumber: string, inputCode: string, ticket?: string): Promise<boolean> {
   const roll = rollNumber.trim().toUpperCase();
   const code = inputCode.trim();
   if (!roll || !code) return false;
 
+  // 1. Try cryptographic ticket verification (stateless & serverless resilient)
+  if (ticket && verifyOtpSignature(roll, code, ticket)) {
+    global.__memoryOtps?.delete(roll);
+    return true;
+  }
+
+  // 2. Fall back to memory store
   const now = Date.now();
   const record = global.__memoryOtps?.get(roll);
   if (record && record.code === code && record.expiresAt > now) {

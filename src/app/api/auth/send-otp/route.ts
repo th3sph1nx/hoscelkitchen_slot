@@ -37,23 +37,40 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Also store in fallback memory/database in case of Supabase email rate limits
-    const fallback = await generateAndSendOtp(roll);
+    // Dispatch via Gmail SMTP (or local fallback if Gmail credentials not yet set)
+    const dispatchResult = await generateAndSendOtp(roll);
     const isRateLimited = Boolean(
       supabaseErrorMsg &&
       (supabaseErrorMsg.toLowerCase().includes('rate limit') || supabaseErrorMsg.toLowerCase().includes('limit'))
     );
 
-    return NextResponse.json({
+    const isGmailConfigured = dispatchResult.sentVia === 'gmail-smtp';
+
+    const res = NextResponse.json({
       success: true,
       email,
-      provider: sentViaSupabase ? 'supabase-auth' : 'local-dispatch',
+      provider: isGmailConfigured ? 'gmail-smtp' : (sentViaSupabase ? 'supabase-auth' : 'local-dispatch'),
       rateLimited: isRateLimited,
-      devOtp: fallback.devOtp,
-      note: sentViaSupabase
-        ? 'OTP sent via Supabase Authentication to your college email'
-        : (supabaseErrorMsg || 'Fallback OTP generated'),
+      devOtp: isGmailConfigured ? undefined : dispatchResult.devOtp, // Only expose bypass code if Gmail is not sending real email
+      ticket: dispatchResult.ticket,
+      sentVia: dispatchResult.sentVia,
+      note: isGmailConfigured
+        ? 'Passcode sent directly to your college email via Gmail SMTP.'
+        : (sentViaSupabase
+          ? 'OTP sent via Supabase Authentication to your college email.'
+          : (supabaseErrorMsg || 'Fallback OTP generated.')),
     });
+
+    // Set signed cookie for ticket
+    res.cookies.set('ganga_otp_ticket', dispatchResult.ticket, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 10 * 60, // 10 minutes
+      path: '/',
+    });
+
+    return res;
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Failed to send OTP' }, { status: 400 });
   }

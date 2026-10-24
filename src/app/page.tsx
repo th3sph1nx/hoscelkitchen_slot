@@ -52,6 +52,7 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [authMsg, setAuthMsg] = useState<{ text: string; isError: boolean } | null>(null);
   const [devOtpCode, setDevOtpCode] = useState<string | null>(null);
+  const [otpTicket, setOtpTicket] = useState<string | null>(null);
   const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
 
   // Booking Form State
@@ -304,24 +305,32 @@ export default function Home() {
 
       setOtpSent(true);
       setIsRateLimited(Boolean(data.rateLimited));
+      if (data.ticket) {
+        setOtpTicket(data.ticket);
+      }
       if (data.devOtp) {
         setDevOtpCode(data.devOtp);
         setOtpInput(data.devOtp); // Auto-fill so student is never stuck!
       }
 
-      if (data.rateLimited) {
+      if (data.provider === 'gmail-smtp') {
         setAuthMsg({
-          text: 'Supabase free SMTP quota reached (3 emails/hr). Your instant bypass code is auto-filled below.',
+          text: `Passcode sent directly to ${data.email} via Gmail SMTP. Please check your inbox!`,
+          isError: false,
+        });
+      } else if (data.rateLimited) {
+        setAuthMsg({
+          text: 'Supabase free quota reached (3 emails/hr). Your instant bypass code is auto-filled below.',
           isError: false,
         });
       } else {
         setAuthMsg({
-          text: `OTP & Login Link dispatched to ${data.email}. Check inbox & Spam folder.`,
+          text: `OTP passcode dispatched to ${data.email}. Check inbox & Spam folder.`,
           isError: false,
         });
       }
     } catch (err: any) {
-      setAuthMsg({ text: err.message || 'Failed to send OTP via Supabase', isError: true });
+      setAuthMsg({ text: err.message || 'Failed to send OTP', isError: true });
     } finally {
       setAuthLoading(false);
     }
@@ -346,6 +355,7 @@ export default function Home() {
         body: JSON.stringify({
           rollNumber: loginRollInput.trim().toUpperCase(),
           code: codeToVerify,
+          ticket: otpTicket,
         }),
       });
       const data = await res.json();
@@ -360,6 +370,7 @@ export default function Home() {
       setLoginRollInput('');
       setOtpInput('');
       setDevOtpCode(null);
+      setOtpTicket(null);
       setIsRateLimited(false);
     } catch (err: any) {
       setAuthMsg({ text: err.message || 'Invalid or expired OTP', isError: true });
