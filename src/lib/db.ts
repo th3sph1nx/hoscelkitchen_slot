@@ -573,17 +573,18 @@ export async function cancelBooking(idOrCode: string, rollNumber?: string): Prom
 
   if (client) {
     try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrCode);
       let query = client.from('bookings').update({ status: 'cancelled' });
-      if (idOrCode.includes('-')) {
-        query = query.eq('booking_code', idOrCode.toUpperCase());
-      } else {
+      if (isUuid) {
         query = query.eq('id', idOrCode);
+      } else {
+        query = query.eq('booking_code', idOrCode.toUpperCase());
       }
       if (rollNumber && !isAdmin) {
         query = query.eq('student_roll', rollNumber.toUpperCase());
       }
-      const { error } = await query;
-      if (!error) return true;
+      const { data, error } = await query.select();
+      if (!error && data && data.length > 0) return true;
     } catch (err) {
       console.warn('Supabase cancel error:', err);
     }
