@@ -39,13 +39,20 @@ export async function POST(req: NextRequest) {
 
     // Also store in fallback memory/database in case of Supabase email rate limits
     const fallback = await generateAndSendOtp(roll);
+    const isRateLimited = Boolean(
+      supabaseErrorMsg &&
+      (supabaseErrorMsg.toLowerCase().includes('rate limit') || supabaseErrorMsg.toLowerCase().includes('limit'))
+    );
 
     return NextResponse.json({
       success: true,
       email,
       provider: sentViaSupabase ? 'supabase-auth' : 'local-dispatch',
+      rateLimited: isRateLimited,
       devOtp: fallback.devOtp,
-      note: sentViaSupabase ? 'OTP sent via Supabase Authentication to your college email' : supabaseErrorMsg,
+      note: sentViaSupabase
+        ? 'OTP sent via Supabase Authentication to your college email'
+        : (supabaseErrorMsg || 'Fallback OTP generated'),
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Failed to send OTP' }, { status: 400 });

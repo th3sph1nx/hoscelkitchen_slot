@@ -5,6 +5,37 @@ import { FacilityId, Booking, CurrentStatus, BlacklistEntry, CooldownEntry, ADMI
 import { supabase } from '@/lib/supabase';
 import { format, addDays } from 'date-fns';
 
+function formatBookingSchedule(startTime: string, endTime: string): { dateStr: string; timeStr: string } {
+  const dateMatch = startTime.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  let dateStr = '';
+  if (dateMatch) {
+    const d = new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    dateStr = `${days[d.getDay()]}, ${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  } else {
+    dateStr = format(new Date(startTime), 'EEE, dd MMM yyyy');
+  }
+
+  const startMatch = startTime.match(/T(\d{2}):(\d{2})/);
+  const endMatch = endTime.match(/T(\d{2}):(\d{2})/);
+
+  const startFormatted = startMatch ? `${startMatch[1]}:${startMatch[2]}` : format(new Date(startTime), 'HH:mm');
+  const endFormatted = endMatch ? `${endMatch[1]}:${endMatch[2]}` : format(new Date(endTime), 'HH:mm');
+
+  return {
+    dateStr,
+    timeStr: `${startFormatted} – ${endFormatted}`,
+  };
+}
+
+function formatTimeOnly(timeIso?: string): string {
+  if (!timeIso) return '';
+  const match = timeIso.match(/T(\d{2}):(\d{2})/);
+  if (match) return `${match[1]}:${match[2]}`;
+  return format(new Date(timeIso), 'HH:mm');
+}
+
 export default function Home() {
   // Authentication State
   const [userRoll, setUserRoll] = useState<string>('');
@@ -21,6 +52,7 @@ export default function Home() {
   const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [authMsg, setAuthMsg] = useState<{ text: string; isError: boolean } | null>(null);
   const [devOtpCode, setDevOtpCode] = useState<string | null>(null);
+  const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
 
   // Booking Form State
   const [facility, setFacility] = useState<FacilityId>('kitchen');
@@ -271,9 +303,22 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error);
 
       setOtpSent(true);
-      setAuthMsg({ text: `OTP sent via Supabase to ${data.email}. Check your inbox.`, isError: false });
+      setIsRateLimited(Boolean(data.rateLimited));
       if (data.devOtp) {
         setDevOtpCode(data.devOtp);
+        setOtpInput(data.devOtp); // Auto-fill so student is never stuck!
+      }
+
+      if (data.rateLimited) {
+        setAuthMsg({
+          text: 'Supabase free SMTP quota reached (3 emails/hr). Your instant bypass code is auto-filled below.',
+          isError: false,
+        });
+      } else {
+        setAuthMsg({
+          text: `OTP & Login Link dispatched to ${data.email}. Check inbox & Spam folder.`,
+          isError: false,
+        });
       }
     } catch (err: any) {
       setAuthMsg({ text: err.message || 'Failed to send OTP via Supabase', isError: true });
@@ -283,9 +328,15 @@ export default function Home() {
   };
 
   // Verify Supabase OTP
-  const handleVerifyOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleVerifyOtp = async (e?: React.FormEvent, customCode?: string) => {
+    if (e) e.preventDefault();
     setAuthMsg(null);
+
+    const codeToVerify = (customCode || otpInput || devOtpCode || '').trim();
+    if (!codeToVerify) {
+      setAuthMsg({ text: 'Please enter the verification code', isError: true });
+      return;
+    }
 
     setAuthLoading(true);
     try {
@@ -294,7 +345,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           rollNumber: loginRollInput.trim().toUpperCase(),
-          code: otpInput.trim(),
+          code: codeToVerify,
         }),
       });
       const data = await res.json();
@@ -309,6 +360,7 @@ export default function Home() {
       setLoginRollInput('');
       setOtpInput('');
       setDevOtpCode(null);
+      setIsRateLimited(false);
     } catch (err: any) {
       setAuthMsg({ text: err.message || 'Invalid or expired OTP', isError: true });
     } finally {
@@ -642,18 +694,50 @@ export default function Home() {
             </form>
           ) : (
             <div className="space-y-3">
-              <div className="p-3 bg-zinc-950 border border-zinc-800 rounded space-y-1.5 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="font-semibold text-zinc-200">Email Dispatched</span>
-                  <span className="text-[10px] text-sky-400 animate-pulse font-mono">Waiting for link click or OTP...</span>
+              {isRateLimited ? (
+                <div className="p-3.5 bg-amber-950/40 border border-amber-600/70 rounded-lg space-y-2 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-amber-300">⚠️ Supabase Hourly Limit Reached (3/hr)</span>
+                    <span className="text-[10px] text-amber-400 font-mono font-bold">Instant Bypass Active</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-300">
+                    Supabase&apos;s default free SMTP limits projects to 3 emails/hour. To prevent you from getting stuck, an instant verification code has been generated:
+                  </p>
+                  <div className="flex items-center justify-between bg-zinc-950 p-2.5 rounded border border-amber-900/80">
+                    <div>
+                      <span className="text-zinc-500 text-[10px] uppercase tracking-wider block">One-Time Code:</span>
+                      <span className="text-xl font-bold font-mono tracking-widest text-amber-400">{devOtpCode}</span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={authLoading}
+                      onClick={() => handleVerifyOtp(undefined, devOtpCode || undefined)}
+                      className="px-3 py-1.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold rounded text-xs transition-colors"
+                    >
+                      {authLoading ? 'Verifying...' : '⚡ Auto-fill & Log In'}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-zinc-400">
+                    💡 To send real emails to all students, enable <strong>Custom SMTP</strong> in Supabase Settings (e.g. Resend or Gmail) to lift the 3/hr limit.
+                  </p>
                 </div>
-                <p className="text-[11px] text-zinc-400">
-                  Supabase sent an email to <span className="text-zinc-200 font-semibold">{loginRollInput.toLowerCase()}@nitpy.ac.in</span>.
-                </p>
-                <p className="text-[11px] text-emerald-400/90 font-medium">
-                  👉 Click the <strong className="underline">Log In</strong> button in the email to log in automatically, or type the 6-digit code below:
-                </p>
-              </div>
+              ) : (
+                <div className="p-3 bg-zinc-950 border border-zinc-800 rounded space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-zinc-200">Email Dispatched</span>
+                    <span className="text-[10px] text-sky-400 animate-pulse font-mono">Waiting for link click or OTP...</span>
+                  </div>
+                  <p className="text-[11px] text-zinc-400">
+                    Supabase sent an email to <span className="text-zinc-200 font-semibold">{loginRollInput.toLowerCase()}@nitpy.ac.in</span>.
+                  </p>
+                  <p className="text-[11px] text-emerald-400/90 font-medium">
+                    👉 Click the <strong className="underline">Log In</strong> button in the email to log in automatically, or enter the 6-digit code below:
+                  </p>
+                  <p className="text-[10px] text-zinc-500">
+                    Note: If not in inbox, please check your <strong>Spam / Junk</strong> folder.
+                  </p>
+                </div>
+              )}
 
               <form onSubmit={handleVerifyOtp} className="space-y-2.5">
                 <div className="flex gap-2">
@@ -663,7 +747,7 @@ export default function Home() {
                     placeholder="Enter 6-digit OTP"
                     value={otpInput}
                     onChange={(e) => setOtpInput(e.target.value)}
-                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 tracking-widest focus:outline-none focus:border-zinc-500"
+                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 font-mono tracking-widest focus:outline-none focus:border-zinc-500"
                   />
                   <button
                     type="submit"
@@ -674,16 +758,23 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setOtpSent(false); setAuthMsg(null); }}
+                    onClick={() => { setOtpSent(false); setAuthMsg(null); setIsRateLimited(false); }}
                     className="bg-zinc-800 text-zinc-300 px-3 py-2 rounded hover:bg-zinc-700"
                   >
                     Back
                   </button>
                 </div>
 
-                {devOtpCode && (
-                  <div className="text-[11px] bg-zinc-800/80 border border-zinc-700 p-2 rounded text-zinc-300">
-                    Backup / Fallback OTP: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong>
+                {devOtpCode && !isRateLimited && (
+                  <div className="text-[11px] bg-zinc-800/80 border border-zinc-700 p-2 rounded text-zinc-300 flex items-center justify-between">
+                    <span>Dev Code: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong></span>
+                    <button
+                      type="button"
+                      onClick={() => handleVerifyOtp(undefined, devOtpCode)}
+                      className="text-[10px] text-sky-400 hover:underline"
+                    >
+                      Use code
+                    </button>
                   </div>
                 )}
               </form>
@@ -810,6 +901,7 @@ export default function Home() {
                       {displayedBookings.map((b) => {
                         const isEditing = editingBookingId === b.id;
                         const isConfirmed = b.status === 'confirmed';
+                        const sched = formatBookingSchedule(b.start_time, b.end_time);
 
                         return (
                           <div
@@ -820,15 +912,30 @@ export default function Home() {
                           >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div>
-                              <span className="font-bold text-zinc-100 uppercase">
-                                [{b.booking_code}] {b.facility_id}
-                              </span>{' '}
-                              <span className="text-amber-300 font-bold">{b.roll_number}</span>{' '}
-                              <span className="text-zinc-500">({b.attendees_count} ppl)</span>
-                              <div className="text-[11px] text-zinc-400">
-                                {format(new Date(b.start_time), 'dd MMM yyyy, HH:mm')} –{' '}
-                                {format(new Date(b.end_time), 'HH:mm')}
-                                {b.purpose && ` • "${b.purpose}"`}
+                              <div className="flex items-center gap-2">
+                                <span className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase ${
+                                  b.facility_id === 'kitchen' ? 'bg-amber-950 text-amber-300 border border-amber-800/60' : 'bg-sky-950 text-sky-300 border border-sky-800/60'
+                                }`}>
+                                  [{b.booking_code}] {b.facility_id === 'kitchen' ? 'Kitchen' : 'TV Room'}
+                                </span>
+                                <span className="text-amber-400 font-bold font-mono">{b.roll_number}</span>
+                                <span className="text-zinc-500 text-xs">({b.attendees_count} {b.attendees_count === 1 ? 'person' : 'people'})</span>
+                                <span className={`text-[10px] font-semibold px-1.5 py-0.2 rounded ${
+                                  isConfirmed ? 'text-emerald-400 bg-emerald-950/50' : 'text-zinc-500 bg-zinc-900'
+                                }`}>
+                                  {isConfirmed ? '● Confirmed' : 'Cancelled'}
+                                </span>
+                              </div>
+
+                              <div className="text-zinc-300 font-medium text-xs mt-1.5 flex items-center gap-1.5">
+                                <span className="text-zinc-400">📅</span>
+                                <span>{sched.dateStr}</span>
+                                <span className="text-zinc-500">•</span>
+                                <span className="text-amber-300 font-bold font-mono">{sched.timeStr}</span>
+                              </div>
+
+                              <div className="text-[11px] text-zinc-500 mt-0.5">
+                                Purpose: <span className="text-zinc-400">{b.purpose ? b.purpose : 'General / Personal Use'}</span>
                               </div>
                             </div>
 
@@ -1062,13 +1169,8 @@ export default function Home() {
                 <div className="mt-1 text-zinc-400 text-[11px]">
                   {status?.kitchen.isOccupied ? (
                     <span>
-                      By {status.kitchen.currentBooking?.roll_number} until{' '}
-                      {status.kitchen.currentBooking?.end_time
-                        ? new Date(status.kitchen.currentBooking.end_time).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })
-                        : ''}
+                      By <strong className="text-zinc-200">{status.kitchen.currentBooking?.roll_number}</strong> until{' '}
+                      <strong className="text-amber-300">{formatTimeOnly(status.kitchen.currentBooking?.end_time)}</strong>
                     </span>
                   ) : (
                     <span>Available for booking</span>
@@ -1089,13 +1191,8 @@ export default function Home() {
                 <div className="mt-1 text-zinc-400 text-[11px]">
                   {status?.tvRoom.isOccupied ? (
                     <span>
-                      By {status.tvRoom.currentBooking?.roll_number} until{' '}
-                      {status.tvRoom.currentBooking?.end_time
-                        ? new Date(status.tvRoom.currentBooking.end_time).toLocaleTimeString([], {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })
-                        : ''}
+                      By <strong className="text-zinc-200">{status.tvRoom.currentBooking?.roll_number}</strong> until{' '}
+                      <strong className="text-amber-300">{formatTimeOnly(status.tvRoom.currentBooking?.end_time)}</strong>
                     </span>
                   ) : (
                     <span>Available for booking</span>
@@ -1280,42 +1377,81 @@ export default function Home() {
           </form>
 
           {/* MY BOOKINGS */}
-          {isLoggedIn && myBookings.length > 0 && (
+          {isLoggedIn && (
             <div className="border border-zinc-800 bg-zinc-900/40 rounded-lg p-4 space-y-3">
-              <div className="text-zinc-400 text-xs uppercase tracking-wider font-semibold">
-                My Bookings ({myBookings.length})
+              <div className="flex items-center justify-between border-b border-zinc-800/80 pb-2">
+                <div className="text-zinc-400 text-xs uppercase tracking-wider font-semibold">
+                  My Bookings ({myBookings.length})
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchMyBookings}
+                  className="text-[11px] text-zinc-400 hover:text-zinc-200 font-mono"
+                >
+                  ↻ Refresh
+                </button>
               </div>
 
-              <div className="space-y-2 text-xs">
-                {myBookings.map((b) => (
-                  <div
-                    key={b.id}
-                    className="p-3 border border-zinc-800 bg-zinc-950 rounded flex items-center justify-between"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="font-bold text-zinc-100">
-                          {b.facility_id === 'kitchen' ? 'Kitchen' : 'TV Room'}
-                        </span>
-                        <span className="text-zinc-500">[{b.booking_code}]</span>
-                        <span className="text-zinc-400">({b.attendees_count} people)</span>
-                      </div>
-                      <div className="text-zinc-400 text-[11px] mt-0.5">
-                        {format(new Date(b.start_time), 'dd MMM yyyy, HH:mm')} –{' '}
-                        {format(new Date(b.end_time), 'HH:mm')}
-                      </div>
-                    </div>
+              {myBookings.length === 0 ? (
+                <div className="py-4 text-center space-y-1">
+                  <p className="text-zinc-400 text-xs">No active reservations found for roll <span className="text-zinc-200 font-bold">{userRoll}</span></p>
+                  <p className="text-zinc-600 text-[11px]">Select your preferred amenity and time slot above, then click Confirm Booking.</p>
+                </div>
+              ) : (
+                <div className="space-y-2 text-xs">
+                  {myBookings.map((b) => {
+                    const sched = formatBookingSchedule(b.start_time, b.end_time);
+                    const isConfirmed = b.status === 'confirmed';
 
-                    <button
-                      type="button"
-                      onClick={() => handleCancelBooking(b.booking_code)}
-                      className="text-rose-400 hover:text-rose-300 underline text-xs"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                ))}
-              </div>
+                    return (
+                      <div
+                        key={b.id}
+                        className={`p-3 border rounded flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
+                          isConfirmed ? 'border-zinc-800 bg-zinc-950' : 'border-zinc-900 bg-zinc-950/40 opacity-50'
+                        }`}
+                      >
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-0.5 rounded text-[11px] font-bold uppercase ${
+                              b.facility_id === 'kitchen' ? 'bg-amber-950 text-amber-300 border border-amber-800/60' : 'bg-sky-950 text-sky-300 border border-sky-800/60'
+                            }`}>
+                              {b.facility_id === 'kitchen' ? 'Kitchen' : 'TV Room'}
+                            </span>
+                            <span className="font-mono text-zinc-300 font-bold">[{b.booking_code}]</span>
+                            <span className="text-zinc-400 text-[11px]">({b.attendees_count} {b.attendees_count === 1 ? 'person' : 'people'})</span>
+                            <span className={`text-[10px] font-semibold px-1.5 py-0.2 rounded ${
+                              isConfirmed ? 'text-emerald-400 bg-emerald-950/50' : 'text-zinc-500 bg-zinc-900'
+                            }`}>
+                              {isConfirmed ? '● Confirmed' : 'Cancelled'}
+                            </span>
+                          </div>
+
+                          <div className="text-zinc-300 font-medium text-xs mt-1.5 flex items-center gap-1.5">
+                            <span className="text-zinc-400">📅</span>
+                            <span>{sched.dateStr}</span>
+                            <span className="text-zinc-500">•</span>
+                            <span className="text-amber-300 font-bold font-mono">{sched.timeStr}</span>
+                          </div>
+
+                          <div className="text-[11px] text-zinc-500 mt-0.5">
+                            Purpose: <span className="text-zinc-400">{b.purpose ? b.purpose : 'General / Personal Use'}</span>
+                          </div>
+                        </div>
+
+                        {isConfirmed && (
+                          <button
+                            type="button"
+                            onClick={() => handleCancelBooking(b.booking_code)}
+                            className="px-2.5 py-1 bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-900/60 rounded text-xs transition-colors self-start sm:self-center"
+                          >
+                            Cancel Slot
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
         </div>
