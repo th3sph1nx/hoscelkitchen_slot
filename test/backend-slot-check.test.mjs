@@ -1,174 +1,131 @@
 import assert from 'node:assert';
 
-const PORT = 3088;
+const PORT = 3089;
 const BASE_URL = `http://localhost:${PORT}`;
 
 async function runTests() {
-  console.log('🧪 Starting backend slot free checking test suite...');
+  console.log('🧪 Running NITPy Hostel Amenities Test Suite (Dark Minimal & OTP)...');
 
-  // 1. Check Initial Availability for Tomorrow 10:00 to 11:00
+  // 1. Invalid Roll Number check
+  console.log('\n👉 Test 1: Validate 8-char alphanumeric roll number...');
+  const badRollRes = await fetch(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rollNumber: 'CS1' }), // only 3 chars
+  });
+  assert.strictEqual(badRollRes.status, 400);
+  console.log('✅ Passed: Invalid roll number rejected.');
+
+  // 2. Request OTP for valid roll number (CS21B101)
+  console.log('\n👉 Test 2: Request OTP for CS21B101 (email: cs21b101@nitpy.ac.in)...');
+  const otpRes = await fetch(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rollNumber: 'CS21B101' }),
+  });
+  const otpData = await otpRes.json();
+  assert.strictEqual(otpRes.status, 200);
+  assert.strictEqual(otpData.email, 'cs21b101@nitpy.ac.in');
+  assert.ok(otpData.devOtp, 'Development OTP returned for verification');
+  const validCode = otpData.devOtp;
+  console.log(`✅ Passed: OTP sent to ${otpData.email} (Code: ${validCode})`);
+
+  // 3. Verify OTP
+  console.log('\n👉 Test 3: Verify with incorrect OTP then correct OTP...');
+  const badVerifyRes = await fetch(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rollNumber: 'CS21B101', code: '000000' }),
+  });
+  assert.strictEqual(badVerifyRes.status, 401);
+
+  const goodVerifyRes = await fetch(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rollNumber: 'CS21B101', code: validCode }),
+  });
+  const verifyData = await goodVerifyRes.json();
+  assert.strictEqual(goodVerifyRes.status, 200);
+  assert.strictEqual(verifyData.rollNumber, 'CS21B101');
+  console.log('✅ Passed: Student logged in and verified.');
+
+  // 4. Check initial live status
+  console.log('\n👉 Test 4: Check current facility status...');
+  const statusRes = await fetch(`${BASE_URL}/api/status`);
+  const statusData = await statusRes.json();
+  assert.strictEqual(statusRes.status, 200);
+  assert.ok('kitchen' in statusData.status);
+  assert.ok('tvRoom' in statusData.status);
+  console.log('✅ Passed: Live status retrieved.');
+
+  // 5. Book kitchen slot (2 consecutive hours, 4 people)
+  console.log('\n👉 Test 5: Book Kitchen slot for 2 consecutive hours (18:00 - 20:00)...');
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const dateStr = tomorrow.toISOString().slice(0, 10);
 
-  const slotStart = `${dateStr}T10:00:00.000Z`;
-  const slotEnd = `${dateStr}T11:00:00.000Z`;
+  const startISO = `${dateStr}T18:00:00.000Z`;
+  const endISO = `${dateStr}T20:00:00.000Z`;
 
-  console.log('\n👉 Test 1: Check availability for empty slot on backend...');
-  const checkRes1 = await fetch(`${BASE_URL}/api/check-availability`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      facilityId: 'kitchen',
-      startTime: slotStart,
-      endTime: slotEnd,
-    }),
-  });
-  const checkData1 = await checkRes1.json();
-  assert.strictEqual(checkRes1.status, 200);
-  assert.strictEqual(checkData1.isAvailable, true, 'Slot should be available initially');
-  console.log('✅ Passed: Slot is verified free by backend.');
-
-  // 2. Book the slot
-  console.log('\n👉 Test 2: Book the kitchen slot for Student A...');
-  const bookRes1 = await fetch(`${BASE_URL}/api/bookings`, {
+  const bookRes = await fetch(`${BASE_URL}/api/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       facility_id: 'kitchen',
-      student_name: 'Ananya Roy',
-      student_roll: '23CS101',
-      student_room: 'Room A-202',
-      student_phone: '+91 99887 76655',
-      purpose: 'Baking a cake',
+      roll_number: 'CS21B101',
+      attendees_count: 4,
+      start_time: startISO,
+      end_time: endISO,
+      purpose: 'Dinner prep with roomies',
+    }),
+  });
+  const bookData = await bookRes.json();
+  assert.strictEqual(bookRes.status, 201);
+  assert.ok(bookData.booking.booking_code.startsWith('KIT-'));
+  const bookingCode = bookData.booking.booking_code;
+  console.log(`✅ Passed: Booking confirmed with code ${bookingCode} for 4 people.`);
+
+  // 6. Backend slot conflict check
+  console.log('\n👉 Test 6: Verify backend rejects overlapping slot for another student...');
+  const conflictRes = await fetch(`${BASE_URL}/api/bookings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      facility_id: 'kitchen',
+      roll_number: 'EC22B005',
       attendees_count: 2,
-      start_time: slotStart,
-      end_time: slotEnd,
+      start_time: `${dateStr}T19:00:00.000Z`, // overlaps 18:00 - 20:00
+      end_time: `${dateStr}T21:00:00.000Z`,
     }),
   });
-  const bookData1 = await bookRes1.json();
-  assert.strictEqual(bookRes1.status, 201);
-  assert.ok(bookData1.booking.booking_code.startsWith('KIT-'));
-  const bookingA = bookData1.booking;
-  console.log(`✅ Passed: Booking created with code ${bookingA.booking_code}`);
+  assert.strictEqual(conflictRes.status, 409, 'Backend must return 409 Conflict');
+  console.log('✅ Passed: Backend blocked double-booking with 409 Conflict.');
 
-  // 3. Backend Slot Free Checking: Try to check overlapping slot
-  console.log('\n👉 Test 3: Backend availability check for overlapping slot (10:30 to 11:30)...');
-  const overlapStart = `${dateStr}T10:30:00.000Z`;
-  const overlapEnd = `${dateStr}T11:30:00.000Z`;
-
-  const checkRes2 = await fetch(`${BASE_URL}/api/check-availability`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      facilityId: 'kitchen',
-      startTime: overlapStart,
-      endTime: overlapEnd,
-    }),
-  });
-  const checkData2 = await checkRes2.json();
-  assert.strictEqual(checkRes2.status, 200);
-  assert.strictEqual(checkData2.isAvailable, false, 'Backend must flag overlapping slot as unavailable');
-  assert.ok(checkData2.conflicts.length > 0, 'Conflicting booking must be returned');
-  console.log('✅ Passed: Backend correctly detected overlap conflict.');
-
-  // 4. Double Booking Attempt: Backend must REJECT simultaneous/conflicting booking
-  console.log('\n👉 Test 4: Attempt to double-book overlapping slot on backend...');
-  const bookRes2 = await fetch(`${BASE_URL}/api/bookings`, {
+  // 7. Max duration check (> 3 hours)
+  console.log('\n👉 Test 7: Verify max duration limit of 3 hours...');
+  const longRes = await fetch(`${BASE_URL}/api/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       facility_id: 'kitchen',
-      student_name: 'Vikram Singh',
-      student_roll: '23ME044',
-      student_room: 'Room A-301',
-      student_phone: '+91 91234 56789',
-      purpose: 'Making soup',
+      roll_number: 'CS21B101',
       attendees_count: 1,
-      start_time: overlapStart,
-      end_time: overlapEnd,
+      start_time: `${dateStr}T10:00:00.000Z`,
+      end_time: `${dateStr}T14:30:00.000Z`, // 4.5 hours
     }),
   });
-  const bookData2 = await bookRes2.json();
-  assert.strictEqual(bookRes2.status, 409, 'Backend must return 409 Conflict status');
-  assert.ok(
-    bookData2.error.includes('already booked') || bookData2.error.includes('overlaps'),
-    'Backend must return descriptive conflict error'
-  );
-  console.log('✅ Passed: Backend successfully blocked double booking (409 Conflict).');
+  assert.strictEqual(longRes.status, 400);
+  console.log('✅ Passed: Duration exceeding 3 hours rejected.');
 
-  // 5. Exceeding Max Duration check
-  console.log('\n👉 Test 5: Verify max duration constraint on backend...');
-  const longStart = `${dateStr}T12:00:00.000Z`;
-  const longEnd = `${dateStr}T18:00:00.000Z`; // 6 hours (max is 3)
-  const bookRes3 = await fetch(`${BASE_URL}/api/bookings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      facility_id: 'kitchen',
-      student_name: 'Test Student',
-      student_roll: '23CS999',
-      student_room: 'Room A-101',
-      student_phone: '+91 90000 00000',
-      purpose: 'Marathon cook',
-      start_time: longStart,
-      end_time: longEnd,
-    }),
-  });
-  const bookData3 = await bookRes3.json();
-  assert.strictEqual(bookRes3.status, 400);
-  assert.ok(bookData3.error.includes('Maximum booking duration'));
-  console.log('✅ Passed: Backend rejected booking exceeding 3 hours limit.');
-
-  // 6. Representative Key Handover flow
-  console.log('\n👉 Test 6: Representative records key handover to student...');
-  const handoverRes = await fetch(`${BASE_URL}/api/bookings/${bookingA.id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key_status: 'collected' }),
-  });
-  const handoverData = await handoverRes.json();
-  assert.strictEqual(handoverRes.status, 200);
-  assert.strictEqual(handoverData.booking.key_status, 'collected');
-  assert.ok(handoverData.booking.key_collected_at);
-  console.log('✅ Passed: Key status updated to "collected" with timestamp.');
-
-  // 7. Representative Key Return flow
-  console.log('\n👉 Test 7: Representative records key returned by student...');
-  const returnRes = await fetch(`${BASE_URL}/api/bookings/${bookingA.id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key_status: 'returned' }),
-  });
-  const returnData = await returnRes.json();
-  assert.strictEqual(returnRes.status, 200);
-  assert.strictEqual(returnData.booking.key_status, 'returned');
-  assert.ok(returnData.booking.key_returned_at);
-  console.log('✅ Passed: Key status updated to "returned" with timestamp.');
-
-  // 8. Cancellation frees up slot
-  console.log('\n👉 Test 8: Student cancels booking, slot becomes free again...');
-  const cancelRes = await fetch(`${BASE_URL}/api/bookings/${bookingA.id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: 'cancelled' }),
+  // 8. Cancellation
+  console.log('\n👉 Test 8: Cancel booking...');
+  const cancelRes = await fetch(`${BASE_URL}/api/bookings/${bookingCode}?roll_number=CS21B101`, {
+    method: 'DELETE',
   });
   assert.strictEqual(cancelRes.status, 200);
+  console.log('✅ Passed: Booking cancelled.');
 
-  const checkRes3 = await fetch(`${BASE_URL}/api/check-availability`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      facilityId: 'kitchen',
-      startTime: slotStart,
-      endTime: slotEnd,
-    }),
-  });
-  const checkData3 = await checkRes3.json();
-  assert.strictEqual(checkData3.isAvailable, true, 'Slot should be freed after cancellation');
-  console.log('✅ Passed: Slot is verified free again after cancellation.');
-
-  console.log('\n🎉 ALL 8 BACKEND TEST SCENARIOS PASSED WITH ZERO ERRORS!\n');
+  console.log('\n🎉 ALL TESTS PASSED SUCCESSFULLY!\n');
 }
 
 runTests().catch((err) => {

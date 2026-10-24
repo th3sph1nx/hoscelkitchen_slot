@@ -1,80 +1,47 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBookings, createBooking } from '@/lib/db';
-import { FacilityId, BookingStatus, KeyStatus } from '@/lib/types';
+import { FacilityId } from '@/lib/types';
+
+export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const facilityId = searchParams.get('facilityId') as FacilityId | undefined;
+    const facility_id = (searchParams.get('facility_id') || searchParams.get('facilityId')) as FacilityId | undefined;
     const date = searchParams.get('date') || undefined;
-    const roll = searchParams.get('roll') || undefined;
-    const code = searchParams.get('code') || undefined;
-    const status = searchParams.get('status') as BookingStatus | undefined;
-    const keyStatus = searchParams.get('keyStatus') as KeyStatus | undefined;
+    const roll_number = (searchParams.get('roll_number') || searchParams.get('roll')) || undefined;
 
-    const bookings = await getBookings({
-      facilityId,
-      date,
-      roll,
-      code,
-      status,
-      keyStatus,
-    });
-
+    const bookings = await getBookings({ facility_id, date, roll_number });
     return NextResponse.json({ bookings });
   } catch (err: any) {
-    console.error('Error in GET /api/bookings:', err);
-    return NextResponse.json(
-      { error: err.message || 'Failed to fetch bookings' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err.message || 'Failed to fetch bookings' }, { status: 500 });
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const {
-      facility_id,
-      student_name,
-      student_roll,
-      student_room,
-      student_phone,
-      purpose,
-      attendees_count,
-      start_time,
-      end_time,
-      notes,
-    } = body;
+    const { facility_id, roll_number, attendees_count, start_time, end_time, purpose } = body;
 
-    // Call atomic createBooking which performs BACKEND slot free checking
+    if (!facility_id || !roll_number || !start_time || !end_time) {
+      return NextResponse.json({ error: 'Missing required booking fields' }, { status: 400 });
+    }
+
     const booking = await createBooking({
       facility_id,
-      student_name,
-      student_roll,
-      student_room,
-      student_phone,
-      purpose,
-      attendees_count,
+      roll_number,
+      attendees_count: Number(attendees_count) || 1,
       start_time,
       end_time,
-      notes,
+      purpose,
     });
 
-    return NextResponse.json(
-      { success: true, booking, message: 'Time slot booked successfully!' },
-      { status: 201 }
-    );
+    return NextResponse.json({ success: true, booking }, { status: 201 });
   } catch (err: any) {
-    console.error('Error creating booking in /api/bookings:', err);
     const isConflict =
       err.message?.includes('already booked') ||
       err.message?.includes('Conflict') ||
-      err.message?.includes('overlaps');
-
-    return NextResponse.json(
-      { error: err.message || 'Failed to create booking' },
-      { status: isConflict ? 409 : 400 }
-    );
+      err.message?.includes('occupied');
+    return NextResponse.json({ error: err.message || 'Booking failed' }, { status: isConflict ? 409 : 400 });
   }
 }

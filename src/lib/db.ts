@@ -1,220 +1,139 @@
-import { Booking, FacilityId, HostelSettings, KeyStatus, BookingStatus } from './types';
-import { DEFAULT_HOSTEL_SETTINGS, FACILITIES } from './constants';
-import { getSupabaseServerClient, isSupabaseConfigured } from './supabase';
-import { areIntervalsOverlapping, generateBookingCode } from './utils';
+import { Booking, FacilityId, CurrentStatus, OtpRecord } from './types';
+import { getSupabaseServerClient } from './supabase';
+import { sendOtpEmail } from './email';
 
-// In-memory store fallback when Supabase keys are not set up yet
+// Global memory stores for fallback/local mode
 declare global {
   // eslint-disable-next-line no-var
   var __memoryBookings: Booking[] | undefined;
   // eslint-disable-next-line no-var
-  var __memorySettings: HostelSettings | undefined;
-}
-
-if (!global.__memorySettings) {
-  global.__memorySettings = { ...DEFAULT_HOSTEL_SETTINGS };
+  var __memoryOtps: Map<string, { code: string; expiresAt: number; email: string }> | undefined;
 }
 
 if (!global.__memoryBookings) {
-  // Add some realistic seed bookings for demonstration
-  const today = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const yyyy = today.getFullYear();
-  const mm = pad(today.getMonth() + 1);
-  const dd = pad(today.getDate());
-
-  global.__memoryBookings = [
-    {
-      id: 'demo-1',
-      booking_code: 'KIT-1024',
-      facility_id: 'kitchen',
-      student_name: 'Rahul Sharma',
-      student_roll: '21CS045',
-      student_room: 'Room A-112',
-      student_phone: '+91 98111 22233',
-      purpose: 'Cooking pasta dinner for study group',
-      attendees_count: 3,
-      start_time: new Date(`${yyyy}-${mm}-${dd}T19:00:00`).toISOString(),
-      end_time: new Date(`${yyyy}-${mm}-${dd}T20:30:00`).toISOString(),
-      status: 'confirmed',
-      key_status: 'not_collected',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      notes: 'Need microwave and induction stove'
-    },
-    {
-      id: 'demo-2',
-      booking_code: 'TV-2048',
-      facility_id: 'tv-room',
-      student_name: 'Priya Patel',
-      student_roll: '22EE019',
-      student_room: 'Room B-305',
-      student_phone: '+91 98222 33344',
-      purpose: 'Premier League Football screening',
-      attendees_count: 8,
-      start_time: new Date(`${yyyy}-${mm}-${dd}T21:00:00`).toISOString(),
-      end_time: new Date(`${yyyy}-${mm}-${dd}T23:00:00`).toISOString(),
-      status: 'confirmed',
-      key_status: 'not_collected',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      notes: 'Will bring HDMI cable'
-    }
-  ];
+  global.__memoryBookings = [];
 }
 
-export async function getHostelSettings(): Promise<HostelSettings> {
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data, error } = await client
-        .from('hostel_settings')
-        .select('*')
-        .eq('id', 'current')
-        .single();
-
-      if (!error && data) {
-        return data as HostelSettings;
-      }
-    } catch (err) {
-      console.warn('Could not fetch settings from Supabase, using fallback:', err);
-    }
-  }
-
-  return global.__memorySettings || DEFAULT_HOSTEL_SETTINGS;
-}
-
-export async function updateHostelSettings(updates: Partial<HostelSettings>): Promise<HostelSettings> {
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data, error } = await client
-        .from('hostel_settings')
-        .upsert({ id: 'current', ...updates, updated_at: new Date().toISOString() })
-        .select()
-        .single();
-
-      if (!error && data) {
-        return data as HostelSettings;
-      }
-    } catch (err) {
-      console.warn('Could not update settings in Supabase:', err);
-    }
-  }
-
-  global.__memorySettings = {
-    ...DEFAULT_HOSTEL_SETTINGS,
-    ...(global.__memorySettings || {}),
-    ...updates,
-  };
-  return global.__memorySettings;
-}
-
-export interface GetBookingsFilter {
-  facilityId?: FacilityId;
-  date?: string; // YYYY-MM-DD
-  roll?: string;
-  code?: string;
-  status?: BookingStatus;
-  keyStatus?: KeyStatus;
-}
-
-export async function getBookings(filter?: GetBookingsFilter): Promise<Booking[]> {
-  const client = getSupabaseServerClient();
-
-  if (client) {
-    try {
-      let query = client.from('bookings').select('*').order('start_time', { ascending: true });
-
-      if (filter?.facilityId) {
-        query = query.eq('facility_id', filter.facilityId);
-      }
-      if (filter?.status) {
-        query = query.eq('status', filter.status);
-      }
-      if (filter?.keyStatus) {
-        query = query.eq('key_status', filter.keyStatus);
-      }
-      if (filter?.roll) {
-        query = query.ilike('student_roll', `%${filter.roll.trim()}%`);
-      }
-      if (filter?.code) {
-        query = query.ilike('booking_code', `%${filter.code.trim()}%`);
-      }
-      if (filter?.date) {
-        const startOfDay = new Date(`${filter.date}T00:00:00Z`).toISOString();
-        const endOfDay = new Date(`${filter.date}T23:59:59Z`).toISOString();
-        query = query.gte('start_time', startOfDay).lte('start_time', endOfDay);
-      }
-
-      const { data, error } = await query;
-      if (!error && data) {
-        return data as Booking[];
-      }
-    } catch (err) {
-      console.warn('Could not query Supabase bookings, using memory fallback:', err);
-    }
-  }
-
-  // Fallback to in-memory store
-  let list = global.__memoryBookings || [];
-
-  if (filter?.facilityId) {
-    list = list.filter((b) => b.facility_id === filter.facilityId);
-  }
-  if (filter?.status) {
-    list = list.filter((b) => b.status === filter.status);
-  }
-  if (filter?.keyStatus) {
-    list = list.filter((b) => b.key_status === filter.keyStatus);
-  }
-  if (filter?.roll) {
-    const q = filter.roll.trim().toLowerCase();
-    list = list.filter((b) => b.student_roll.toLowerCase().includes(q));
-  }
-  if (filter?.code) {
-    const q = filter.code.trim().toUpperCase();
-    list = list.filter((b) => b.booking_code.toUpperCase().includes(q));
-  }
-  if (filter?.date) {
-    list = list.filter((b) => b.start_time.startsWith(filter.date!));
-  }
-
-  return [...list].sort(
-    (a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime()
-  );
-}
-
-export async function getBookingByCode(bookingCode: string): Promise<Booking | null> {
-  const code = bookingCode.trim().toUpperCase();
-  const client = getSupabaseServerClient();
-
-  if (client) {
-    try {
-      const { data, error } = await client
-        .from('bookings')
-        .select('*')
-        .eq('booking_code', code)
-        .maybeSingle();
-
-      if (!error && data) {
-        return data as Booking;
-      }
-    } catch (err) {
-      console.warn('Error fetching booking by code from Supabase:', err);
-    }
-  }
-
-  const memoryMatch = (global.__memoryBookings || []).find(
-    (b) => b.booking_code.toUpperCase() === code
-  );
-  return memoryMatch || null;
+if (!global.__memoryOtps) {
+  global.__memoryOtps = new Map();
 }
 
 /**
- * CRITICAL BACKEND SLOT FREE CHECKING:
- * Evaluates whether a proposed start_time to end_time slot is available.
- * Checked strictly on the server before insertion.
+ * Validate NITPy 8-character alphanumeric roll number
+ */
+export function validateRollNumber(input: string): { isValid: boolean; roll: string; email: string; error?: string } {
+  const clean = input.trim().toUpperCase();
+  if (!clean) {
+    return { isValid: false, roll: '', email: '', error: 'Roll number is required' };
+  }
+
+  // Must be strictly 8 characters alphanumeric
+  const regex = /^[A-Z0-9]{8}$/;
+  if (!regex.test(clean)) {
+    return {
+      isValid: false,
+      roll: clean,
+      email: '',
+      error: 'Roll number must be exactly 8 alphanumeric characters (e.g. CS21B101)',
+    };
+  }
+
+  const email = `${clean.toLowerCase()}@nitpy.ac.in`;
+  return { isValid: true, roll: clean, email };
+}
+
+/**
+ * Generate 6-digit OTP and store with 10-minute validity
+ */
+export async function generateAndSendOtp(rollNumber: string): Promise<{ success: boolean; email: string; devOtp?: string }> {
+  const validation = validateRollNumber(rollNumber);
+  if (!validation.isValid) {
+    throw new Error(validation.error);
+  }
+
+  const { roll, email } = validation;
+  // Generate cryptographically sensible 6-digit code
+  const code = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+
+  // Store in memory cache
+  global.__memoryOtps?.set(roll, { code, expiresAt, email });
+
+  // Store in Supabase if connected
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      await client.from('otps').delete().eq('roll_number', roll);
+      await client.from('otps').insert({
+        roll_number: roll,
+        email,
+        code,
+        expires_at: new Date(expiresAt).toISOString(),
+      });
+    } catch (err) {
+      console.warn('Could not store OTP in Supabase, using memory store:', err);
+    }
+  }
+
+  // Send email dispatch
+  const dispatch = await sendOtpEmail({ email, rollNumber: roll, code });
+  return { success: true, email, devOtp: dispatch.devOtp };
+}
+
+/**
+ * Verify OTP
+ */
+export async function verifyOtp(rollNumber: string, inputCode: string): Promise<boolean> {
+  const roll = rollNumber.trim().toUpperCase();
+  const code = inputCode.trim();
+
+  if (!roll || !code) return false;
+
+  const now = Date.now();
+
+  // Try Supabase verification first
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data, error } = await client
+        .from('otps')
+        .select('*')
+        .eq('roll_number', roll)
+        .eq('code', code)
+        .gt('expires_at', new Date(now).toISOString())
+        .maybeSingle();
+
+      if (!error && data) {
+        // Delete used OTP
+        await client.from('otps').delete().eq('id', data.id);
+        global.__memoryOtps?.delete(roll);
+        return true;
+      }
+    } catch (err) {
+      console.warn('Supabase OTP check fallback:', err);
+    }
+  }
+
+  // Memory store fallback
+  const record = global.__memoryOtps?.get(roll);
+  if (record && record.code === code && record.expiresAt > now) {
+    global.__memoryOtps?.delete(roll);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Check if intervals overlap: startA < endB AND endA > startB
+ */
+function areOverlapping(startA: Date, endA: Date, startB: Date, endB: Date): boolean {
+  return startA.getTime() < endB.getTime() && endA.getTime() > startB.getTime();
+}
+
+/**
+ * BACKEND SLOT FREE CHECKING:
+ * Strict server-side verification before booking
  */
 export async function checkSlotAvailability(
   facilityId: FacilityId,
@@ -226,31 +145,24 @@ export async function checkSlotAvailability(
   const end = new Date(endTime);
 
   if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-    return { isAvailable: false, conflicts: [], reason: 'Invalid start or end time format.' };
+    return { isAvailable: false, conflicts: [], reason: 'Invalid date/time format.' };
   }
 
   if (start >= end) {
     return { isAvailable: false, conflicts: [], reason: 'Start time must be before end time.' };
   }
 
-  // Facility check
-  const facility = FACILITIES.find((f) => f.id === facilityId);
-  if (!facility) {
-    return { isAvailable: false, conflicts: [], reason: 'Facility not found.' };
-  }
-
-  // Check maximum duration (e.g. 3 hours)
+  // Max 3 consecutive hours constraint
   const durationHours = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
-  if (durationHours > facility.maxDurationHours) {
+  if (durationHours > 3.01) {
     return {
       isAvailable: false,
       conflicts: [],
-      reason: `Maximum booking duration is ${facility.maxDurationHours} hours (requested: ${durationHours.toFixed(1)}h).`,
+      reason: `Maximum continuous booking duration is 3 hours (requested: ${durationHours.toFixed(1)} hrs).`,
     };
   }
 
-  // Query database for overlapping confirmed bookings:
-  // Overlap condition: b.start_time < proposed_end AND b.end_time > proposed_start
+  // Query Supabase for conflicts
   const client = getSupabaseServerClient();
   if (client) {
     try {
@@ -274,22 +186,26 @@ export async function checkSlotAvailability(
           conflicts,
           reason:
             conflicts.length > 0
-              ? `Slot overlaps with an existing booking by ${conflicts[0].student_name} (${conflicts[0].student_room}).`
+              ? `Slot occupied by ${conflicts[0].roll_number} (${new Date(
+                  conflicts[0].start_time
+                ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${new Date(
+                  conflicts[0].end_time
+                ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
               : undefined,
         };
       }
     } catch (err) {
-      console.warn('Supabase slot check error, checking memory:', err);
+      console.warn('Supabase slot query fallback to memory:', err);
     }
   }
 
-  // Memory fallback check
+  // Memory fallback
   const conflicts = (global.__memoryBookings || []).filter(
     (b) =>
       b.facility_id === facilityId &&
       b.status === 'confirmed' &&
       (!excludeBookingId || b.id !== excludeBookingId) &&
-      areIntervalsOverlapping(start, end, b.start_time, b.end_time)
+      areOverlapping(start, end, new Date(b.start_time), new Date(b.end_time))
   );
 
   return {
@@ -297,157 +213,197 @@ export async function checkSlotAvailability(
     conflicts,
     reason:
       conflicts.length > 0
-        ? `Slot overlaps with an existing booking by ${conflicts[0].student_name} (${conflicts[0].student_room}).`
+        ? `Slot occupied by ${conflicts[0].roll_number} (${new Date(
+            conflicts[0].start_time
+          ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${new Date(
+            conflicts[0].end_time
+          ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
         : undefined,
   };
 }
 
-export interface CreateBookingInput {
+/**
+ * Atomic booking creation with backend slot verification
+ */
+export async function createBooking(input: {
   facility_id: FacilityId;
-  student_name: string;
-  student_roll: string;
-  student_room: string;
-  student_phone: string;
-  purpose: string;
-  attendees_count?: number;
+  roll_number: string;
+  attendees_count: number;
   start_time: string;
   end_time: string;
-  notes?: string;
-}
-
-/**
- * ATOMIC BACKEND BOOKING CREATION WITH SLOT FREE VERIFICATION
- * Runs backend validation, checks for conflicts, and creates the booking.
- */
-export async function createBooking(input: CreateBookingInput): Promise<Booking> {
-  // 1. Strict Server-Side Validation
-  if (!input.student_name?.trim()) throw new Error('Student name is required');
-  if (!input.student_roll?.trim()) throw new Error('Roll number is required');
-  if (!input.student_room?.trim()) throw new Error('Room number is required');
-  if (!input.student_phone?.trim()) throw new Error('Phone number is required');
-  if (!input.purpose?.trim()) throw new Error('Purpose of booking is required');
+  purpose?: string;
+}): Promise<Booking> {
+  const validation = validateRollNumber(input.roll_number);
+  if (!validation.isValid) {
+    throw new Error(validation.error);
+  }
 
   const start = new Date(input.start_time);
   const end = new Date(input.end_time);
 
   if (isNaN(start.getTime()) || isNaN(end.getTime())) {
-    throw new Error('Invalid date/time provided');
+    throw new Error('Invalid start/end time');
   }
 
   if (start >= end) {
-    throw new Error('Slot start time must be before end time');
+    throw new Error('Start time must be before end time');
   }
 
   if (start.getTime() < Date.now() - 5 * 60 * 1000) {
-    // 5 min grace period for clock drift
-    throw new Error('Cannot book time slots in the past');
+    throw new Error('Cannot book past time slots');
   }
 
-  // 2. Perform Backend Slot Free Checking
-  const availability = await checkSlotAvailability(
-    input.facility_id,
-    input.start_time,
-    input.end_time
-  );
-
+  // Backend slot check
+  const availability = await checkSlotAvailability(input.facility_id, input.start_time, input.end_time);
   if (!availability.isAvailable) {
-    throw new Error(
-      availability.reason || 'Requested time slot is already booked. Please choose a different time.'
-    );
+    throw new Error(availability.reason || 'This time slot is already booked.');
   }
 
-  // 3. Generate unique booking code
-  const bookingCode = generateBookingCode(input.facility_id);
+  const attendees = Math.min(Math.max(Number(input.attendees_count) || 1, 1), 25);
+  const prefix = input.facility_id === 'kitchen' ? 'KIT' : 'TV';
+  const bookingCode = `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
   const nowIso = new Date().toISOString();
 
   const newBooking: Booking = {
     id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `book-${Date.now()}`,
     booking_code: bookingCode,
     facility_id: input.facility_id,
-    student_name: input.student_name.trim(),
-    student_roll: input.student_roll.trim().toUpperCase(),
-    student_room: input.student_room.trim(),
-    student_phone: input.student_phone.trim(),
-    purpose: input.purpose.trim(),
-    attendees_count: Number(input.attendees_count) || 1,
+    roll_number: validation.roll,
+    email: validation.email,
+    attendees_count: attendees,
+    purpose: input.purpose?.trim() || '',
     start_time: input.start_time,
     end_time: input.end_time,
     status: 'confirmed',
-    key_status: 'not_collected',
     created_at: nowIso,
-    updated_at: nowIso,
-    notes: input.notes?.trim() || null,
   };
 
   const client = getSupabaseServerClient();
   if (client) {
     try {
-      const { data, error } = await client
-        .from('bookings')
-        .insert(newBooking)
-        .select()
-        .single();
-
+      const { data, error } = await client.from('bookings').insert(newBooking).select().single();
       if (error) {
-        // Check for postgres exclusion constraint violation code 23P01
         if (error.code === '23P01' || error.message.includes('overlapping')) {
-          throw new Error('Conflict detected: This time slot was just booked by another student. Please pick another slot.');
+          throw new Error('Conflict: Slot was just taken by another user.');
         }
         throw new Error(error.message);
       }
-
       return data as Booking;
     } catch (err: any) {
       if (err.message.includes('Conflict')) throw err;
-      console.warn('Error inserting to Supabase, falling back to memory store:', err);
+      console.warn('Supabase insert fallback:', err);
     }
   }
 
-  // Memory store fallback
   global.__memoryBookings = global.__memoryBookings || [];
   global.__memoryBookings.push(newBooking);
-
   return newBooking;
 }
 
 /**
- * Update key handover / return status or cancel booking
+ * Get all confirmed bookings for a date or facility
  */
-export async function updateBooking(
-  id: string,
-  updates: Partial<Booking>
-): Promise<Booking> {
-  const nowIso = new Date().toISOString();
-  const payload = { ...updates, updated_at: nowIso };
-
+export async function getBookings(filter?: {
+  facility_id?: FacilityId;
+  date?: string; // YYYY-MM-DD
+  roll_number?: string;
+}): Promise<Booking[]> {
   const client = getSupabaseServerClient();
   if (client) {
     try {
-      const { data, error } = await client
-        .from('bookings')
-        .update(payload)
-        .eq('id', id)
-        .select()
-        .single();
-
-      if (!error && data) {
-        return data as Booking;
+      let query = client.from('bookings').select('*').order('start_time', { ascending: true });
+      if (filter?.facility_id) query = query.eq('facility_id', filter.facility_id);
+      if (filter?.roll_number) query = query.eq('roll_number', filter.roll_number.toUpperCase());
+      if (filter?.date) {
+        query = query
+          .gte('start_time', `${filter.date}T00:00:00Z`)
+          .lte('start_time', `${filter.date}T23:59:59Z`);
       }
+      const { data, error } = await query;
+      if (!error && data) return data as Booking[];
     } catch (err) {
-      console.warn('Could not update booking in Supabase:', err);
+      console.warn('Supabase getBookings fallback:', err);
+    }
+  }
+
+  let list = global.__memoryBookings || [];
+  if (filter?.facility_id) list = list.filter((b) => b.facility_id === filter.facility_id);
+  if (filter?.roll_number) {
+    list = list.filter((b) => b.roll_number.toUpperCase() === filter.roll_number?.toUpperCase());
+  }
+  if (filter?.date) {
+    list = list.filter((b) => b.start_time.startsWith(filter.date!));
+  }
+  return [...list].sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
+}
+
+/**
+ * Get current live status of Kitchen & TV Room
+ */
+export async function getCurrentFacilityStatus(): Promise<CurrentStatus> {
+  const all = await getBookings();
+  const now = new Date();
+
+  const getStatus = (facilityId: FacilityId) => {
+    const facilityBookings = all
+      .filter((b) => b.facility_id === facilityId && b.status === 'confirmed')
+      .sort((a, b) => new Date(a.start_time).getTime() - new Date(b.start_time).getTime());
+
+    const currentBooking =
+      facilityBookings.find((b) => {
+        const s = new Date(b.start_time);
+        const e = new Date(b.end_time);
+        return s <= now && now <= e;
+      }) || null;
+
+    const nextBooking =
+      facilityBookings.find((b) => new Date(b.start_time) > now) || null;
+
+    return {
+      isOccupied: Boolean(currentBooking),
+      currentBooking,
+      nextBooking,
+    };
+  };
+
+  return {
+    kitchen: getStatus('kitchen'),
+    tvRoom: getStatus('tv-room'),
+  };
+}
+
+/**
+ * Cancel booking
+ */
+export async function cancelBooking(idOrCode: string, rollNumber?: string): Promise<boolean> {
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      let query = client.from('bookings').update({ status: 'cancelled' });
+      if (idOrCode.includes('-')) {
+        query = query.eq('booking_code', idOrCode.toUpperCase());
+      } else {
+        query = query.eq('id', idOrCode);
+      }
+      if (rollNumber) {
+        query = query.eq('roll_number', rollNumber.toUpperCase());
+      }
+      const { error } = await query;
+      if (!error) return true;
+    } catch (err) {
+      console.warn('Supabase cancel error:', err);
     }
   }
 
   const list = global.__memoryBookings || [];
-  const index = list.findIndex((b) => b.id === id || b.booking_code === id);
-  if (index === -1) {
-    throw new Error('Booking not found');
+  const item = list.find(
+    (b) =>
+      (b.id === idOrCode || b.booking_code === idOrCode.toUpperCase()) &&
+      (!rollNumber || b.roll_number === rollNumber.toUpperCase())
+  );
+  if (item) {
+    item.status = 'cancelled';
+    return true;
   }
-
-  list[index] = {
-    ...list[index],
-    ...payload,
-  };
-
-  return list[index];
+  return false;
 }

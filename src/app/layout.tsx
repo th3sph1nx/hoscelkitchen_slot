@@ -1,12 +1,9 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import { Navbar } from '@/components/Navbar';
-import { Footer } from '@/components/Footer';
 
 export const metadata: Metadata = {
-  title: 'Hostel Amenities & Key Booking | Common Kitchen & TV Room',
-  description:
-    'Reserve time slots for the hostel common kitchen and TV recreation room. Check live slot availability and collect keys from the representative.',
+  title: 'NITPy Hostel Amenities',
+  description: 'Kitchen & TV Room slot reservation system for NIT Puducherry',
 };
 
 export default function RootLayout({
@@ -15,11 +12,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className="bg-slate-50 text-slate-900 antialiased flex flex-col min-h-screen">
-        <Navbar />
-        <main className="flex-1">{children}</main>
-        <Footer />
+    <html lang="en" className="dark">
+      <body className="bg-zinc-950 text-zinc-100 min-h-screen antialiased selection:bg-zinc-800 selection:text-zinc-100">
+        <main className="max-w-2xl mx-auto px-4 py-8 sm:py-12">
+          {children}
+        </main>
       </body>
     </html>
   );
