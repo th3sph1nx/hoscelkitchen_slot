@@ -14,17 +14,28 @@ declare global {
   var __memoryCooldowns: Map<string, { expiresAt: number; reason: string; createdAt: string }> | undefined;
 }
 
-if (!global.__memoryBookings) {
-  global.__memoryBookings = [];
-}
-if (!global.__memoryOtps) {
-  global.__memoryOtps = new Map();
-}
-if (!global.__memoryBlacklist) {
-  global.__memoryBlacklist = new Map();
-}
-if (!global.__memoryCooldowns) {
-  global.__memoryCooldowns = new Map();
+if (!global.__memoryBookings) global.__memoryBookings = [];
+if (!global.__memoryOtps) global.__memoryOtps = new Map();
+if (!global.__memoryBlacklist) global.__memoryBlacklist = new Map();
+if (!global.__memoryCooldowns) global.__memoryCooldowns = new Map();
+
+/**
+ * Helper to map Supabase row to Booking type
+ */
+function mapRowToBooking(row: any): Booking {
+  return {
+    id: row.id,
+    booking_code: row.booking_code,
+    facility_id: row.facility_id as FacilityId,
+    roll_number: (row.student_roll || row.roll_number || '').toUpperCase(),
+    email: row.notes || row.email || `${(row.student_roll || row.roll_number || '').toLowerCase()}@nitpy.ac.in`,
+    attendees_count: row.attendees_count || 1,
+    purpose: row.purpose || '',
+    start_time: row.start_time,
+    end_time: row.end_time,
+    status: row.status || 'confirmed',
+    created_at: row.created_at,
+  };
 }
 
 /**
@@ -36,7 +47,6 @@ export function validateRollNumber(input: string): { isValid: boolean; roll: str
     return { isValid: false, roll: '', email: '', error: 'Roll number is required' };
   }
 
-  // Must be 8 to 10 alphanumeric characters (e.g. CS21B101, CS25B1058)
   const regex = /^[A-Z0-9]{8,10}$/;
   if (!regex.test(clean)) {
     return {
@@ -66,21 +76,6 @@ export async function generateAndSendOtp(rollNumber: string): Promise<{ success:
 
   global.__memoryOtps?.set(roll, { code, expiresAt, email });
 
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from('otps').delete().eq('roll_number', roll);
-      await client.from('otps').insert({
-        roll_number: roll,
-        email,
-        code,
-        expires_at: new Date(expiresAt).toISOString(),
-      });
-    } catch (err) {
-      console.warn('Supabase OTP store error, fallback to memory:', err);
-    }
-  }
-
   const dispatch = await sendOtpEmail({ email, rollNumber: roll, code });
   return { success: true, email, devOtp: dispatch.devOtp };
 }
@@ -91,32 +86,9 @@ export async function generateAndSendOtp(rollNumber: string): Promise<{ success:
 export async function verifyOtp(rollNumber: string, inputCode: string): Promise<boolean> {
   const roll = rollNumber.trim().toUpperCase();
   const code = inputCode.trim();
-
   if (!roll || !code) return false;
 
   const now = Date.now();
-
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data, error } = await client
-        .from('otps')
-        .select('*')
-        .eq('roll_number', roll)
-        .eq('code', code)
-        .gt('expires_at', new Date(now).toISOString())
-        .maybeSingle();
-
-      if (!error && data) {
-        await client.from('otps').delete().eq('id', data.id);
-        global.__memoryOtps?.delete(roll);
-        return true;
-      }
-    } catch (err) {
-      console.warn('Supabase OTP check fallback:', err);
-    }
-  }
-
   const record = global.__memoryOtps?.get(roll);
   if (record && record.code === code && record.expiresAt > now) {
     global.__memoryOtps?.delete(roll);
@@ -127,89 +99,98 @@ export async function verifyOtp(rollNumber: string, inputCode: string): Promise<
 }
 
 /**
- * Check if intervals overlap
+ * Check if intervals overlap: startA < endB AND endA > startB
  */
 function areOverlapping(startA: Date, endA: Date, startB: Date, endB: Date): boolean {
   return startA.getTime() < endB.getTime() && endA.getTime() > startB.getTime();
 }
 
 /**
- * Blacklist Management
+ * Helper to fetch and sync persistent policy storage in Supabase hostel_settings table
  */
-export async function isRollBlacklisted(rollNumber: string): Promise<{ isBlacklisted: boolean; reason?: string }> {
-  const roll = rollNumber.trim().toUpperCase();
+async function getPersistentPolicies(): Promise<{ blacklist: Record<string, string>; cooldowns: Record<string, { expiresAt: number; reason: string }> }> {
   const client = getSupabaseServerClient();
   if (client) {
     try {
-      const { data } = await client.from('blacklists').select('*').eq('roll_number', roll).maybeSingle();
-      if (data) return { isBlacklisted: true, reason: data.reason || 'Restricted by Admin' };
+      const { data } = await client.from('hostel_settings').select('rep_email').eq('id', 'current').maybeSingle();
+      if (data?.rep_email && data.rep_email.startsWith('{')) {
+        return JSON.parse(data.rep_email);
+      }
     } catch {}
+  }
+  return { blacklist: {}, cooldowns: {} };
+}
+
+async function savePersistentPolicies(policies: { blacklist: Record<string, string>; cooldowns: Record<string, { expiresAt: number; reason: string }> }): Promise<void> {
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      await client.from('hostel_settings').update({ rep_email: JSON.stringify(policies) }).eq('id', 'current');
+    } catch {}
+  }
+}
+
+/**
+ * Blacklist Management (Persistent in Supabase)
+ */
+export async function isRollBlacklisted(rollNumber: string): Promise<{ isBlacklisted: boolean; reason?: string }> {
+  const roll = rollNumber.trim().toUpperCase();
+  const policies = await getPersistentPolicies();
+  if (policies.blacklist[roll]) {
+    return { isBlacklisted: true, reason: policies.blacklist[roll] };
   }
 
   const mem = global.__memoryBlacklist?.get(roll);
-  if (mem) return { isBlacklisted: true, reason: mem.reason || 'Restricted by Admin' };
+  if (mem) return { isBlacklisted: true, reason: mem.reason };
   return { isBlacklisted: false };
 }
 
 export async function getBlacklist(): Promise<BlacklistEntry[]> {
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data } = await client.from('blacklists').select('*').order('created_at', { ascending: false });
-      if (data) return data as BlacklistEntry[];
-    } catch {}
+  const policies = await getPersistentPolicies();
+  const list: BlacklistEntry[] = [];
+  const seen = new Set<string>();
+
+  for (const [roll, reason] of Object.entries(policies.blacklist)) {
+    list.push({ id: roll, roll_number: roll, reason, created_at: new Date().toISOString() });
+    seen.add(roll);
   }
 
-  const list: BlacklistEntry[] = [];
   global.__memoryBlacklist?.forEach((v, k) => {
-    list.push({ id: k, roll_number: k, reason: v.reason, created_at: v.createdAt });
+    if (!seen.has(k)) {
+      list.push({ id: k, roll_number: k, reason: v.reason, created_at: v.createdAt });
+    }
   });
+
   return list;
 }
 
 export async function addToBlacklist(rollNumber: string, reason: string = ''): Promise<void> {
   const roll = rollNumber.trim().toUpperCase();
-  const now = new Date().toISOString();
-  global.__memoryBlacklist?.set(roll, { reason, createdAt: now });
+  global.__memoryBlacklist?.set(roll, { reason, createdAt: new Date().toISOString() });
 
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from('blacklists').upsert({ roll_number: roll, reason });
-    } catch {}
-  }
+  const policies = await getPersistentPolicies();
+  policies.blacklist[roll] = reason || 'Blacklisted by Admin';
+  await savePersistentPolicies(policies);
 }
 
 export async function removeFromBlacklist(rollNumber: string): Promise<void> {
   const roll = rollNumber.trim().toUpperCase();
   global.__memoryBlacklist?.delete(roll);
 
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from('blacklists').delete().eq('roll_number', roll);
-    } catch {}
-  }
+  const policies = await getPersistentPolicies();
+  delete policies.blacklist[roll];
+  await savePersistentPolicies(policies);
 }
 
 /**
- * Cooldown Management
+ * Cooldown Management (Persistent in Supabase)
  */
 export async function getRollCooldown(rollNumber: string): Promise<{ onCooldown: boolean; expiresAt?: string; reason?: string }> {
   const roll = rollNumber.trim().toUpperCase();
-  const now = new Date().toISOString();
-
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data } = await client
-        .from('cooldowns')
-        .select('*')
-        .eq('roll_number', roll)
-        .gt('expires_at', now)
-        .maybeSingle();
-      if (data) return { onCooldown: true, expiresAt: data.expires_at, reason: data.reason };
-    } catch {}
+  const policies = await getPersistentPolicies();
+  const item = policies.cooldowns[roll];
+  if (item && item.expiresAt > Date.now()) {
+    return { onCooldown: true, expiresAt: new Date(item.expiresAt).toISOString(), reason: item.reason };
   }
 
   const mem = global.__memoryCooldowns?.get(roll);
@@ -220,50 +201,42 @@ export async function getRollCooldown(rollNumber: string): Promise<{ onCooldown:
 }
 
 export async function getCooldowns(): Promise<CooldownEntry[]> {
-  const now = new Date().toISOString();
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data } = await client.from('cooldowns').select('*').gt('expires_at', now).order('expires_at', { ascending: true });
-      if (data) return data as CooldownEntry[];
-    } catch {}
+  const policies = await getPersistentPolicies();
+  const list: CooldownEntry[] = [];
+  const now = Date.now();
+
+  for (const [roll, val] of Object.entries(policies.cooldowns)) {
+    if (val.expiresAt > now) {
+      list.push({
+        id: roll,
+        roll_number: roll,
+        expires_at: new Date(val.expiresAt).toISOString(),
+        reason: val.reason,
+        created_at: new Date().toISOString(),
+      });
+    }
   }
 
-  const list: CooldownEntry[] = [];
-  global.__memoryCooldowns?.forEach((v, k) => {
-    if (v.expiresAt > Date.now()) {
-      list.push({ id: k, roll_number: k, expires_at: new Date(v.expiresAt).toISOString(), reason: v.reason, created_at: v.createdAt });
-    }
-  });
   return list;
 }
 
 export async function setCooldown(rollNumber: string, hours: number, reason: string = ''): Promise<void> {
   const roll = rollNumber.trim().toUpperCase();
   const expiresAt = Date.now() + hours * 60 * 60 * 1000;
-  const isoExpires = new Date(expiresAt).toISOString();
-  const now = new Date().toISOString();
+  global.__memoryCooldowns?.set(roll, { expiresAt, reason, createdAt: new Date().toISOString() });
 
-  global.__memoryCooldowns?.set(roll, { expiresAt, reason, createdAt: now });
-
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from('cooldowns').upsert({ roll_number: roll, expires_at: isoExpires, reason });
-    } catch {}
-  }
+  const policies = await getPersistentPolicies();
+  policies.cooldowns[roll] = { expiresAt, reason };
+  await savePersistentPolicies(policies);
 }
 
 export async function removeCooldown(rollNumber: string): Promise<void> {
   const roll = rollNumber.trim().toUpperCase();
   global.__memoryCooldowns?.delete(roll);
 
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      await client.from('cooldowns').delete().eq('roll_number', roll);
-    } catch {}
-  }
+  const policies = await getPersistentPolicies();
+  delete policies.cooldowns[roll];
+  await savePersistentPolicies(policies);
 }
 
 /**
@@ -296,6 +269,7 @@ export async function checkSlotAvailability(
     };
   }
 
+  // 1. Check live Supabase database
   const client = getSupabaseServerClient();
   if (client) {
     try {
@@ -313,25 +287,25 @@ export async function checkSlotAvailability(
 
       const { data, error } = await query;
       if (!error && data) {
-        const conflicts = data as Booking[];
-        return {
-          isAvailable: conflicts.length === 0,
-          conflicts,
-          reason:
-            conflicts.length > 0
-              ? `Slot occupied by ${conflicts[0].roll_number} (${new Date(
-                  conflicts[0].start_time
-                ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${new Date(
-                  conflicts[0].end_time
-                ).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
-              : undefined,
-        };
+        const conflicts = data.map(mapRowToBooking);
+        if (conflicts.length > 0) {
+          const c = conflicts[0];
+          const sStr = new Date(c.start_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          const eStr = new Date(c.end_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          return {
+            isAvailable: false,
+            conflicts,
+            reason: `Slot occupied by ${c.roll_number} (${sStr} - ${eStr})`,
+          };
+        }
+        return { isAvailable: true, conflicts: [] };
       }
     } catch (err) {
-      console.warn('Supabase slot query fallback to memory:', err);
+      console.warn('Supabase slot check error:', err);
     }
   }
 
+  // 2. Memory check fallback
   const conflicts = (global.__memoryBookings || []).filter(
     (b) =>
       b.facility_id === facilityId &&
@@ -356,6 +330,7 @@ export async function checkSlotAvailability(
 
 /**
  * Atomic booking creation with backend slot verification, blacklist, and cooldown checks
+ * Directly inserts to PostgreSQL with exclusion lock!
  */
 export async function createBooking(input: {
   facility_id: FacilityId;
@@ -398,7 +373,7 @@ export async function createBooking(input: {
     throw new Error('Cannot book past time slots');
   }
 
-  // 3. BACKEND SLOT CHECK
+  // 3. BACKEND SLOT FREE CHECK
   const availability = await checkSlotAvailability(input.facility_id, input.start_time, input.end_time);
   if (!availability.isAvailable) {
     throw new Error(availability.reason || 'This time slot is already booked.');
@@ -409,7 +384,44 @@ export async function createBooking(input: {
   const bookingCode = `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
   const nowIso = new Date().toISOString();
 
-  const newBooking: Booking = {
+  // Map to Supabase table columns accurately
+  const dbPayload = {
+    facility_id: input.facility_id,
+    booking_code: bookingCode,
+    student_name: validation.roll,
+    student_roll: validation.roll,
+    student_room: 'Ganga Hostel',
+    student_phone: validation.roll,
+    notes: validation.email,
+    purpose: input.purpose?.trim() || '',
+    attendees_count: attendees,
+    start_time: input.start_time,
+    end_time: input.end_time,
+    status: 'confirmed',
+    created_at: nowIso,
+  };
+
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data, error } = await client.from('bookings').insert(dbPayload).select().single();
+      if (error) {
+        // PostgreSQL Range Exclusion Constraint Violation (23P01)
+        if (error.code === '23P01' || error.message.includes('overlapping') || error.message.includes('exclusion')) {
+          throw new Error('Slot conflict: This time slot was just booked by another student.');
+        }
+        throw new Error(error.message);
+      }
+      return mapRowToBooking(data);
+    } catch (err: any) {
+      if (err.message.includes('conflict') || err.message.includes('Slot conflict') || err.message.includes('exclusion')) {
+        throw err;
+      }
+      console.warn('Supabase insert error, saving in memory:', err);
+    }
+  }
+
+  const fallbackBooking: Booking = {
     id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `book-${Date.now()}`,
     booking_code: bookingCode,
     facility_id: input.facility_id,
@@ -423,26 +435,9 @@ export async function createBooking(input: {
     created_at: nowIso,
   };
 
-  const client = getSupabaseServerClient();
-  if (client) {
-    try {
-      const { data, error } = await client.from('bookings').insert(newBooking).select().single();
-      if (error) {
-        if (error.code === '23P01' || error.message.includes('overlapping')) {
-          throw new Error('Conflict: Slot was just taken by another user.');
-        }
-        throw new Error(error.message);
-      }
-      return data as Booking;
-    } catch (err: any) {
-      if (err.message.includes('Conflict')) throw err;
-      console.warn('Supabase insert fallback:', err);
-    }
-  }
-
   global.__memoryBookings = global.__memoryBookings || [];
-  global.__memoryBookings.push(newBooking);
-  return newBooking;
+  global.__memoryBookings.push(fallbackBooking);
+  return fallbackBooking;
 }
 
 /**
@@ -455,13 +450,12 @@ export async function updateBookingTiming(bookingId: string, newStartTime: strin
   if (isNaN(start.getTime()) || isNaN(end.getTime())) throw new Error('Invalid date format');
   if (start >= end) throw new Error('Start time must be before end time');
 
-  // Find booking
   let existing: Booking | null = null;
   const client = getSupabaseServerClient();
   if (client) {
     try {
       const { data } = await client.from('bookings').select('*').or(`id.eq.${bookingId},booking_code.eq.${bookingId}`).single();
-      if (data) existing = data as Booking;
+      if (data) existing = mapRowToBooking(data);
     } catch {}
   }
 
@@ -471,13 +465,11 @@ export async function updateBookingTiming(bookingId: string, newStartTime: strin
 
   if (!existing) throw new Error('Booking not found');
 
-  // Verify that new slot timing is free (excluding this booking)
   const check = await checkSlotAvailability(existing.facility_id, newStartTime, newEndTime, existing.id);
   if (!check.isAvailable) {
     throw new Error(check.reason || 'New timing conflicts with another existing booking.');
   }
 
-  // Update in Supabase
   if (client) {
     try {
       const { data, error } = await client
@@ -486,11 +478,10 @@ export async function updateBookingTiming(bookingId: string, newStartTime: strin
         .eq('id', existing.id)
         .select()
         .single();
-      if (!error && data) return data as Booking;
+      if (!error && data) return mapRowToBooking(data);
     } catch {}
   }
 
-  // Update in memory
   existing.start_time = newStartTime;
   existing.end_time = newEndTime;
   return existing;
@@ -503,7 +494,7 @@ export async function getBookings(filter?: {
   facility_id?: FacilityId;
   date?: string;
   roll_number?: string;
-  all?: boolean; // admin can view all including cancelled
+  all?: boolean;
 }): Promise<Booking[]> {
   const client = getSupabaseServerClient();
   if (client) {
@@ -511,14 +502,16 @@ export async function getBookings(filter?: {
       let query = client.from('bookings').select('*').order('start_time', { ascending: true });
       if (!filter?.all) query = query.eq('status', 'confirmed');
       if (filter?.facility_id) query = query.eq('facility_id', filter.facility_id);
-      if (filter?.roll_number) query = query.eq('roll_number', filter.roll_number.toUpperCase());
+      if (filter?.roll_number) query = query.eq('student_roll', filter.roll_number.toUpperCase());
       if (filter?.date) {
         query = query
           .gte('start_time', `${filter.date}T00:00:00Z`)
           .lte('start_time', `${filter.date}T23:59:59Z`);
       }
       const { data, error } = await query;
-      if (!error && data) return data as Booking[];
+      if (!error && data) {
+        return data.map(mapRowToBooking);
+      }
     } catch (err) {
       console.warn('Supabase getBookings fallback:', err);
     }
@@ -587,7 +580,7 @@ export async function cancelBooking(idOrCode: string, rollNumber?: string): Prom
         query = query.eq('id', idOrCode);
       }
       if (rollNumber && !isAdmin) {
-        query = query.eq('roll_number', rollNumber.toUpperCase());
+        query = query.eq('student_roll', rollNumber.toUpperCase());
       }
       const { error } = await query;
       if (!error) return true;

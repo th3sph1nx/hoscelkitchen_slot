@@ -49,9 +49,11 @@ async function runTests() {
 
   // 4. Blacklisted student tries to book -> Backend rejects
   console.log('\n👉 Test 4: Blacklisted student (EC22B005) tries to book -> Backend blocks...');
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const dateStr = tomorrow.toISOString().slice(0, 10);
+  // Clean up any existing test bookings for tomorrow if any
+  const m = String(Math.floor(Math.random() * 11) + 1).padStart(2, '0');
+  const d = String(Math.floor(Math.random() * 25) + 1).padStart(2, '0');
+  const dateStr = `2027-${m}-${d}`;
+  console.log(`Using unique test date: ${dateStr}`);
 
   const blBookRes = await fetch(`${BASE_URL}/api/bookings`, {
     method: 'POST',
@@ -119,32 +121,69 @@ async function runTests() {
   const bookingCode = normalBookData.booking.booking_code;
   console.log(`✅ Passed: Booking ${bookingCode} created.`);
 
-  // 8. Admin changes slot timings
-  console.log('\n👉 Test 8: Admin changes slot timing to 20:00 - 22:00...');
-  const changeRes = await fetch(`${BASE_URL}/api/admin/bookings/${bookingId}`, {
-    method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-admin-roll': ADMIN_ROLL,
-    },
-    body: JSON.stringify({
-      start_time: `${dateStr}T20:00:00.000Z`,
-      end_time: `${dateStr}T22:00:00.000Z`,
-    }),
-  });
-  const changeData = await changeRes.json();
-  assert.strictEqual(changeRes.status, 200);
-  assert.strictEqual(changeData.booking.start_time, `${dateStr}T20:00:00.000Z`);
-  console.log('✅ Passed: Admin successfully changed slot timings on backend.');
+  try {
+    // 8. Admin changes slot timings
+    console.log('\n👉 Test 8: Admin changes slot timing to 20:00 - 22:00...');
+    const changeRes = await fetch(`${BASE_URL}/api/admin/bookings/${bookingId}`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-roll': ADMIN_ROLL,
+      },
+      body: JSON.stringify({
+        start_time: `${dateStr}T20:00:00.000Z`,
+        end_time: `${dateStr}T22:00:00.000Z`,
+      }),
+    });
+    const changeData = await changeRes.json();
+    assert.strictEqual(changeRes.status, 200);
+    assert.strictEqual(new Date(changeData.booking.start_time).getTime(), new Date(`${dateStr}T20:00:00.000Z`).getTime());
+    console.log('✅ Passed: Admin successfully changed slot timings on backend.');
 
-  // 9. Admin removes slot
-  console.log('\n👉 Test 9: Admin removes the slot...');
-  const delRes = await fetch(`${BASE_URL}/api/admin/bookings/${bookingId}`, {
-    method: 'DELETE',
-    headers: { 'x-admin-roll': ADMIN_ROLL },
-  });
-  assert.strictEqual(delRes.status, 200);
-  console.log('✅ Passed: Admin successfully removed slot.');
+    // 9. Background check-availability API & Double Booking Prevention across different roll numbers / emails
+    console.log('\n👉 Test 9: Background check-availability API & Double Booking Prevention across different emails...');
+    const checkBusyRes = await fetch(`${BASE_URL}/api/check-availability?facility_id=tv-room&start_time=${dateStr}T20:00:00.000Z&end_time=${dateStr}T22:00:00.000Z`);
+    const checkBusyData = await checkBusyRes.json();
+    assert.strictEqual(checkBusyRes.status, 200);
+    assert.strictEqual(checkBusyData.isAvailable, false, 'Slot must be reported as NOT available');
+    assert.strictEqual(checkBusyData.conflicts?.[0]?.roll_number, 'CS21B101');
+    console.log(`✅ Passed: Background check accurately identifies slot as busy (${checkBusyData.reason}).`);
+
+    const checkFreeRes = await fetch(`${BASE_URL}/api/check-availability?facility_id=tv-room&start_time=${dateStr}T14:00:00.000Z&end_time=${dateStr}T16:00:00.000Z`);
+    const checkFreeData = await checkFreeRes.json();
+    assert.strictEqual(checkFreeRes.status, 200);
+    assert.strictEqual(checkFreeData.isAvailable, true, 'Slot must be reported as free');
+    console.log('✅ Passed: Background check accurately identifies free slot.');
+
+    // Attempt double booking with DIFFERENT student roll number (e.g. CS22B202) for the 20:00 - 22:00 slot
+    console.log('\n👉 Test 10: Different student (CS22B202) tries to book overlapping slot (20:00 - 22:00)...');
+    const conflictBookRes = await fetch(`${BASE_URL}/api/bookings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        facility_id: 'tv-room',
+        roll_number: 'CS22B202',
+        attendees_count: 2,
+        start_time: `${dateStr}T21:00:00.000Z`,
+        end_time: `${dateStr}T22:00:00.000Z`,
+        purpose: 'Gaming',
+      }),
+    });
+    assert.ok(conflictBookRes.status === 409 || conflictBookRes.status === 400, `Expected 409 Conflict or 400 Bad Request, got ${conflictBookRes.status}`);
+    const conflictData = await conflictBookRes.json();
+    console.log('Conflict response received from backend:', conflictData);
+    assert.ok(conflictData.error.toLowerCase().includes('already booked') || conflictData.error.toLowerCase().includes('conflict') || conflictData.error.toLowerCase().includes('occupied'), 'Error must indicate conflict');
+    console.log(`✅ Passed: Conflicting booking correctly rejected by backend (${conflictData.error}).`);
+  } finally {
+    // 11. Admin removes slot
+    console.log('\n👉 Test 11: Admin removes the slot...');
+    const delRes = await fetch(`${BASE_URL}/api/admin/bookings/${bookingId}`, {
+      method: 'DELETE',
+      headers: { 'x-admin-roll': ADMIN_ROLL },
+    });
+    assert.strictEqual(delRes.status, 200);
+    console.log('✅ Passed: Admin successfully removed slot.');
+  }
 
   console.log('\n🎉 ALL ADMIN & POLICY TESTS PASSED SUCCESSFULLY!\n');
 }

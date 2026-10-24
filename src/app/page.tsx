@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FacilityId, Booking, CurrentStatus, BlacklistEntry, CooldownEntry, ADMIN_ROLL } from '@/lib/types';
 import { format, addDays } from 'date-fns';
 
@@ -29,10 +29,16 @@ export default function Home() {
   const [peopleCount, setPeopleCount] = useState<number>(2);
   const [purpose, setPurpose] = useState<string>('');
 
+  // Live background slot availability checking state
+  const [backendAvailability, setBackendAvailability] = useState<{
+    status: 'checking' | 'available' | 'occupied';
+    message: string;
+    occupiedBy?: string;
+  }>({ status: 'checking', message: 'Checking slot status in background...' });
+
   // Live status & active bookings
   const [status, setStatus] = useState<CurrentStatus | null>(null);
   const [myBookings, setMyBookings] = useState<Booking[]>([]);
-  const [dayBookings, setDayBookings] = useState<Booking[]>([]);
   const [bookingLoading, setBookingLoading] = useState<boolean>(false);
   const [bookingMsg, setBookingMsg] = useState<{ text: string; isError: boolean } | null>(null);
 
@@ -70,23 +76,13 @@ export default function Home() {
     }
   }, []);
 
-  // Poll current live status
+  // Poll current live facility status
   const fetchStatus = async () => {
     try {
       const res = await fetch('/api/status');
       if (res.ok) {
         const data = await res.json();
         setStatus(data.status);
-      }
-    } catch {}
-  };
-
-  const fetchDayBookings = async () => {
-    try {
-      const res = await fetch(`/api/bookings?facility_id=${facility}&date=${selectedDate}`);
-      if (res.ok) {
-        const data = await res.json();
-        setDayBookings(data.bookings || []);
       }
     } catch {}
   };
@@ -102,7 +98,6 @@ export default function Home() {
     } catch {}
   };
 
-  // ADMIN DATA FETCHERS
   const fetchAdminData = async () => {
     if (!isAdmin) return;
     try {
@@ -137,19 +132,72 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    fetchDayBookings();
-  }, [facility, selectedDate]);
-
-  useEffect(() => {
     if (isLoggedIn && userRoll) {
       fetchMyBookings();
-      if (isAdmin) {
-        fetchAdminData();
-      }
+      if (isAdmin) fetchAdminData();
     }
   }, [isLoggedIn, userRoll]);
 
-  // Request OTP
+  // Calculate selected slot ISO strings
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const startISO = `${selectedDate}T${pad(startHour)}:00:00.000Z`;
+  const endHour = startHour + durationHours;
+  const endISO = `${selectedDate}T${pad(endHour)}:00:00.000Z`;
+
+  // BACKGROUND SLOT STATUS CHECKING
+  // Runs automatically whenever facility, date, start hour, or duration changes
+  useEffect(() => {
+    let isCancelled = false;
+    setBackendAvailability({
+      status: 'checking',
+      message: 'Checking slot status in background...',
+    });
+
+    const checkBackgroundSlot = async () => {
+      try {
+        const res = await fetch('/api/check-availability', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            facilityId: facility,
+            startTime: startISO,
+            endTime: endISO,
+          }),
+        });
+
+        const data = await res.json();
+        if (isCancelled) return;
+
+        if (res.ok && data.isAvailable) {
+          setBackendAvailability({
+            status: 'available',
+            message: '● Slot Free - Ready to book',
+          });
+        } else {
+          setBackendAvailability({
+            status: 'occupied',
+            message: data.reason || '● Slot Occupied by another student',
+            occupiedBy: data.conflicts?.[0]?.roll_number,
+          });
+        }
+      } catch (err) {
+        if (!isCancelled) {
+          setBackendAvailability({
+            status: 'available',
+            message: '● Slot Check Ready',
+          });
+        }
+      }
+    };
+
+    const timer = setTimeout(checkBackgroundSlot, 150);
+    return () => {
+      isCancelled = true;
+      clearTimeout(timer);
+    };
+  }, [facility, selectedDate, startHour, durationHours]);
+
+  // Request Supabase OTP
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthMsg(null);
@@ -172,18 +220,18 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error);
 
       setOtpSent(true);
-      setAuthMsg({ text: `OTP sent to ${data.email}`, isError: false });
+      setAuthMsg({ text: `OTP sent via Supabase to ${data.email}. Check your inbox.`, isError: false });
       if (data.devOtp) {
         setDevOtpCode(data.devOtp);
       }
     } catch (err: any) {
-      setAuthMsg({ text: err.message || 'Failed to send OTP', isError: true });
+      setAuthMsg({ text: err.message || 'Failed to send OTP via Supabase', isError: true });
     } finally {
       setAuthLoading(false);
     }
   };
 
-  // Verify OTP
+  // Verify Supabase OTP
   const handleVerifyOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthMsg(null);
@@ -211,7 +259,7 @@ export default function Home() {
       setOtpInput('');
       setDevOtpCode(null);
     } catch (err: any) {
-      setAuthMsg({ text: err.message || 'Invalid OTP', isError: true });
+      setAuthMsg({ text: err.message || 'Invalid or expired OTP', isError: true });
     } finally {
       setAuthLoading(false);
     }
@@ -227,21 +275,7 @@ export default function Home() {
     setActiveView('booker');
   };
 
-  // Calculate selected slot ISO strings
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const startISO = `${selectedDate}T${pad(startHour)}:00:00.000Z`;
-  const endHour = startHour + durationHours;
-  const endISO = `${selectedDate}T${pad(endHour)}:00:00.000Z`;
-
-  const isSlotConflicted = dayBookings.some((b) => {
-    if (b.status !== 'confirmed') return false;
-    const bStart = new Date(b.start_time).getTime();
-    const bEnd = new Date(b.end_time).getTime();
-    const reqStart = new Date(startISO).getTime();
-    const reqEnd = new Date(endISO).getTime();
-    return reqStart < bEnd && reqEnd > bStart;
-  });
-
+  // Handle Booking Submission with Background Pre-check Guard
   const handleBook = async (e: React.FormEvent) => {
     e.preventDefault();
     setBookingMsg(null);
@@ -251,8 +285,36 @@ export default function Home() {
       return;
     }
 
+    if (backendAvailability.status === 'occupied') {
+      setBookingMsg({
+        text: `Cannot book: ${backendAvailability.message}`,
+        isError: true,
+      });
+      return;
+    }
+
     setBookingLoading(true);
     try {
+      // 1. Proactive background check before alerting the user
+      const precheck = await fetch('/api/check-availability', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          facilityId: facility,
+          startTime: startISO,
+          endTime: endISO,
+        }),
+      });
+      const precheckData = await precheck.json();
+      if (!precheck.ok || !precheckData.isAvailable) {
+        setBackendAvailability({
+          status: 'occupied',
+          message: precheckData.reason || 'Slot occupied',
+        });
+        throw new Error(precheckData.reason || 'This slot was just booked by another student.');
+      }
+
+      // 2. Submit booking to backend
       const res = await fetch('/api/bookings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -275,7 +337,6 @@ export default function Home() {
       });
 
       fetchStatus();
-      fetchDayBookings();
       fetchMyBookings();
       if (isAdmin) fetchAdminData();
     } catch (err: any) {
@@ -293,7 +354,6 @@ export default function Home() {
       });
       if (res.ok) {
         fetchStatus();
-        fetchDayBookings();
         fetchMyBookings();
         if (isAdmin) fetchAdminData();
       }
@@ -315,7 +375,6 @@ export default function Home() {
       setAdminMsg({ text: `Slot ${code} removed`, isError: false });
       fetchAdminData();
       fetchStatus();
-      fetchDayBookings();
     } catch (err: any) {
       setAdminMsg({ text: err.message, isError: true });
     }
@@ -346,7 +405,6 @@ export default function Home() {
       setEditingBookingId(null);
       fetchAdminData();
       fetchStatus();
-      fetchDayBookings();
     } catch (err: any) {
       setAdminMsg({ text: err.message || 'Conflict: Slot occupied by another booking', isError: true });
     }
@@ -492,8 +550,9 @@ export default function Home() {
       {/* LOGIN CARD IF NOT LOGGED IN */}
       {!isLoggedIn && (
         <div className="border border-zinc-800 bg-zinc-900/60 p-4 rounded-lg space-y-3">
-          <div className="text-zinc-300 font-bold uppercase tracking-wider text-xs">
-            Student / Admin Login (College ID)
+          <div className="text-zinc-300 font-bold uppercase tracking-wider text-xs flex items-center justify-between">
+            <span>Student / Admin Login (College ID)</span>
+            <span className="text-[10px] text-sky-400 font-normal">Supabase Auth Free Tier</span>
           </div>
 
           {!otpSent ? (
@@ -517,9 +576,10 @@ export default function Home() {
               </div>
               <p className="text-[11px] text-zinc-500">
                 OTP will be sent to{' '}
-                <span className="text-zinc-400">
+                <span className="text-zinc-400 font-semibold">
                   {loginRollInput ? `${loginRollInput.toLowerCase()}@nitpy.ac.in` : 'xxxxx@nitpy.ac.in'}
-                </span>
+                </span>{' '}
+                via Supabase.
               </p>
             </form>
           ) : (
@@ -551,7 +611,7 @@ export default function Home() {
 
               {devOtpCode && (
                 <div className="text-[11px] bg-zinc-800/80 border border-zinc-700 p-2 rounded text-zinc-300">
-                  Test OTP: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong>
+                  Backup / Dev OTP: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong>
                 </div>
               )}
             </form>
@@ -1055,17 +1115,30 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Live Slot Status Pill */}
-            <div className="p-3 bg-zinc-950 border border-zinc-800 rounded flex items-center justify-between text-xs">
+            {/* LIVE BACKGROUND SLOT STATUS INDICATOR */}
+            <div className="p-3 bg-zinc-950 border border-zinc-800 rounded flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 text-xs">
               <span className="text-zinc-400">
                 Selected: <strong className="text-zinc-200">{pad(startHour)}:00</strong> to{' '}
                 <strong className="text-zinc-200">{pad(endHour)}:00</strong> ({selectedDate})
               </span>
-              {isSlotConflicted ? (
-                <span className="text-rose-400 font-bold">● Slot Busy</span>
-              ) : (
-                <span className="text-emerald-400 font-bold">● Slot Free</span>
-              )}
+
+              <div>
+                {backendAvailability.status === 'checking' && (
+                  <span className="text-sky-400 animate-pulse font-medium">
+                    ⟳ Checking slot status in background...
+                  </span>
+                )}
+                {backendAvailability.status === 'available' && (
+                  <span className="text-emerald-400 font-bold">
+                    {backendAvailability.message}
+                  </span>
+                )}
+                {backendAvailability.status === 'occupied' && (
+                  <span className="text-rose-400 font-bold">
+                    {backendAvailability.message}
+                  </span>
+                )}
+              </div>
             </div>
 
             {bookingMsg && (
@@ -1081,10 +1154,10 @@ export default function Home() {
             {/* Submit Button */}
             <button
               type="submit"
-              disabled={bookingLoading || isSlotConflicted || !isLoggedIn}
+              disabled={bookingLoading || backendAvailability.status === 'occupied' || !isLoggedIn}
               className="w-full py-2.5 px-4 bg-zinc-100 hover:bg-white text-zinc-950 font-bold rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {bookingLoading ? 'Checking Slot & Booking...' : 'Confirm Booking'}
+              {bookingLoading ? 'Verifying with Backend & Booking...' : 'Confirm Booking'}
             </button>
           </form>
 
