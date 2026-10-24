@@ -10,8 +10,9 @@ export async function GET(req: NextRequest) {
     const facility_id = (searchParams.get('facility_id') || searchParams.get('facilityId')) as FacilityId | undefined;
     const date = searchParams.get('date') || undefined;
     const roll_number = (searchParams.get('roll_number') || searchParams.get('roll')) || undefined;
+    const all = searchParams.get('all') === 'true' || Boolean(roll_number);
 
-    const bookings = await getBookings({ facility_id, date, roll_number });
+    const bookings = await getBookings({ facility_id, date, roll_number, all });
     return NextResponse.json({ bookings });
   } catch (err: any) {
     return NextResponse.json({ error: err.message || 'Failed to fetch bookings' }, { status: 500 });
