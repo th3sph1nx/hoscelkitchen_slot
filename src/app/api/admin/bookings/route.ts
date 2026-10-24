@@ -17,9 +17,20 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const roll_number = searchParams.get('roll_number') || searchParams.get('roll') || undefined;
+    const client = (await import('@/lib/supabase')).getSupabaseServerClient();
+    
+    // Direct test query
+    const directRes = client ? await client.from('bookings').select('*').order('start_time', { ascending: true }) : null;
     const bookings = await getBookings({ all: true, roll_number });
-    return NextResponse.json({ bookings, count: bookings.length });
+
+    return NextResponse.json({
+      bookings,
+      count: bookings.length,
+      directCount: directRes?.data?.length,
+      directError: directRes?.error,
+      hasClient: Boolean(client),
+    });
   } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return NextResponse.json({ error: err.message, stack: err.stack }, { status: 500 });
   }
 }
