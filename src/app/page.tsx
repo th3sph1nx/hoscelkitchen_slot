@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { FacilityId, Booking, CurrentStatus, BlacklistEntry, CooldownEntry, ADMIN_ROLL } from '@/lib/types';
+import { supabase } from '@/lib/supabase';
 import { format, addDays } from 'date-fns';
 
 export default function Home() {
@@ -44,6 +45,7 @@ export default function Home() {
 
   // ADMIN PANEL STATE
   const [adminTab, setAdminTab] = useState<'slots' | 'blacklist' | 'cooldown'>('slots');
+  const [slotFilter, setSlotFilter] = useState<'all' | 'my'>('all');
   const [allBookings, setAllBookings] = useState<Booking[]>([]);
   const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([]);
   const [cooldowns, setCooldowns] = useState<CooldownEntry[]>([]);
@@ -65,8 +67,9 @@ export default function Home() {
 
   const isAdmin = userRoll.toUpperCase() === ADMIN_ROLL;
 
-  // Load session from localStorage
+  // Load session from localStorage AND listen for Supabase Auth Magic Link redirects
   useEffect(() => {
+    // 1. Check localStorage for existing session
     const savedRoll = localStorage.getItem('nitpy_user_roll');
     const savedEmail = localStorage.getItem('nitpy_user_email');
     if (savedRoll && savedEmail) {
@@ -74,6 +77,54 @@ export default function Home() {
       setUserEmail(savedEmail);
       setIsLoggedIn(true);
     }
+
+    if (!supabase) return;
+
+    const handleAuthUser = (user: any) => {
+      if (!user?.email) return;
+      const email = user.email.toLowerCase();
+      const match = email.match(/^([a-z0-9]+)@nitpy\.ac\.in$/);
+      const roll = match ? match[1].toUpperCase() : email.split('@')[0].toUpperCase();
+
+      setUserRoll(roll);
+      setUserEmail(email);
+      setIsLoggedIn(true);
+      setOtpSent(false);
+      setAuthMsg({ text: `Logged in as ${roll} (${email})`, isError: false });
+      localStorage.setItem('nitpy_user_roll', roll);
+      localStorage.setItem('nitpy_user_email', email);
+
+      // Clean URL hash or search params cleanly
+      if (typeof window !== 'undefined' && (window.location.hash || window.location.search.includes('code='))) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    };
+
+    // 2. Listen to Supabase onAuthStateChange (when user clicks magic link in email)
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        handleAuthUser(session.user);
+      }
+    });
+
+    // 3. Check active session or access_token in URL hash
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        handleAuthUser(session.user);
+      } else if (typeof window !== 'undefined' && window.location.hash.includes('access_token=')) {
+        const hashParams = new URLSearchParams(window.location.hash.substring(1));
+        const token = hashParams.get('access_token');
+        if (token && supabase) {
+          supabase.auth.getUser(token).then(({ data: { user } }) => {
+            if (user) handleAuthUser(user);
+          });
+        }
+      }
+    });
+
+    return () => {
+      authListener?.subscription?.unsubscribe();
+    };
   }, []);
 
   // Poll current live facility status
@@ -265,12 +316,19 @@ export default function Home() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    if (supabase) {
+      try {
+        await supabase.auth.signOut();
+      } catch {}
+    }
     localStorage.removeItem('nitpy_user_roll');
     localStorage.removeItem('nitpy_user_email');
     setIsLoggedIn(false);
     setUserRoll('');
     setUserEmail('');
+    setOtpSent(false);
+    setOtpInput('');
     setMyBookings([]);
     setActiveView('booker');
   };
@@ -583,38 +641,53 @@ export default function Home() {
               </p>
             </form>
           ) : (
-            <form onSubmit={handleVerifyOtp} className="space-y-2.5">
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  maxLength={6}
-                  placeholder="Enter 6-digit OTP"
-                  value={otpInput}
-                  onChange={(e) => setOtpInput(e.target.value)}
-                  className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 tracking-widest focus:outline-none focus:border-zinc-500"
-                />
-                <button
-                  type="submit"
-                  disabled={authLoading}
-                  className="bg-zinc-100 hover:bg-white text-zinc-950 font-bold px-4 py-2 rounded transition-colors disabled:opacity-50"
-                >
-                  {authLoading ? 'Verifying...' : 'Verify'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setOtpSent(false)}
-                  className="bg-zinc-800 text-zinc-300 px-3 py-2 rounded hover:bg-zinc-700"
-                >
-                  Back
-                </button>
+            <div className="space-y-3">
+              <div className="p-3 bg-zinc-950 border border-zinc-800 rounded space-y-1.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-zinc-200">Email Dispatched</span>
+                  <span className="text-[10px] text-sky-400 animate-pulse font-mono">Waiting for link click or OTP...</span>
+                </div>
+                <p className="text-[11px] text-zinc-400">
+                  Supabase sent an email to <span className="text-zinc-200 font-semibold">{loginRollInput.toLowerCase()}@nitpy.ac.in</span>.
+                </p>
+                <p className="text-[11px] text-emerald-400/90 font-medium">
+                  👉 Click the <strong className="underline">Log In</strong> button in the email to log in automatically, or type the 6-digit code below:
+                </p>
               </div>
 
-              {devOtpCode && (
-                <div className="text-[11px] bg-zinc-800/80 border border-zinc-700 p-2 rounded text-zinc-300">
-                  Backup / Dev OTP: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong>
+              <form onSubmit={handleVerifyOtp} className="space-y-2.5">
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    maxLength={6}
+                    placeholder="Enter 6-digit OTP"
+                    value={otpInput}
+                    onChange={(e) => setOtpInput(e.target.value)}
+                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded px-3 py-2 text-zinc-100 tracking-widest focus:outline-none focus:border-zinc-500"
+                  />
+                  <button
+                    type="submit"
+                    disabled={authLoading}
+                    className="bg-zinc-100 hover:bg-white text-zinc-950 font-bold px-4 py-2 rounded transition-colors disabled:opacity-50"
+                  >
+                    {authLoading ? 'Verifying...' : 'Verify OTP'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setOtpSent(false); setAuthMsg(null); }}
+                    className="bg-zinc-800 text-zinc-300 px-3 py-2 rounded hover:bg-zinc-700"
+                  >
+                    Back
+                  </button>
                 </div>
-              )}
-            </form>
+
+                {devOtpCode && (
+                  <div className="text-[11px] bg-zinc-800/80 border border-zinc-700 p-2 rounded text-zinc-300">
+                    Backup / Fallback OTP: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong>
+                  </div>
+                )}
+              </form>
+            </div>
           )}
 
           {authMsg && (
@@ -682,25 +755,69 @@ export default function Home() {
             {/* TAB 1: ALL SLOTS MANAGEMENT */}
             {adminTab === 'slots' && (
               <div className="space-y-3">
-                <div className="text-zinc-400 text-xs uppercase font-semibold">
-                  Manage All Facility Slots
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2">
+                  <div className="text-zinc-400 text-xs uppercase font-semibold">
+                    Manage Facility Slots
+                  </div>
+                  <div className="flex items-center gap-1.5 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setSlotFilter('all')}
+                      className={`px-2.5 py-1 rounded transition-colors ${
+                        slotFilter === 'all'
+                          ? 'bg-zinc-100 text-zinc-950 font-bold'
+                          : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      All Slots ({allBookings.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSlotFilter('my')}
+                      className={`px-2.5 py-1 rounded transition-colors ${
+                        slotFilter === 'my'
+                          ? 'bg-amber-400 text-zinc-950 font-bold'
+                          : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      My Bookings ({allBookings.filter((b) => b.roll_number.toUpperCase() === userRoll.toUpperCase()).length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { fetchAdminData(); fetchMyBookings(); }}
+                      className="px-2 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded font-mono text-[11px]"
+                    >
+                      ↻ Refresh
+                    </button>
+                  </div>
                 </div>
 
-                {allBookings.length === 0 ? (
-                  <p className="text-zinc-500 text-xs py-4 text-center">No bookings on record.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {allBookings.map((b) => {
-                      const isEditing = editingBookingId === b.id;
-                      const isConfirmed = b.status === 'confirmed';
+                {(() => {
+                  const displayedBookings = slotFilter === 'my'
+                    ? allBookings.filter((b) => b.roll_number.toUpperCase() === userRoll.toUpperCase())
+                    : allBookings;
 
-                      return (
-                        <div
-                          key={b.id}
-                          className={`p-3 border rounded space-y-2 ${
-                            isConfirmed ? 'border-zinc-800 bg-zinc-950' : 'border-zinc-900 bg-zinc-950/40 opacity-50'
-                          }`}
-                        >
+                  if (displayedBookings.length === 0) {
+                    return (
+                      <p className="text-zinc-500 text-xs py-4 text-center">
+                        {slotFilter === 'my' ? 'You have no active bookings under roll ' + userRoll : 'No bookings on record.'}
+                      </p>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-2">
+                      {displayedBookings.map((b) => {
+                        const isEditing = editingBookingId === b.id;
+                        const isConfirmed = b.status === 'confirmed';
+
+                        return (
+                          <div
+                            key={b.id}
+                            className={`p-3 border rounded space-y-2 ${
+                              isConfirmed ? 'border-zinc-800 bg-zinc-950' : 'border-zinc-900 bg-zinc-950/40 opacity-50'
+                            }`}
+                          >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div>
                               <span className="font-bold text-zinc-100 uppercase">
@@ -787,9 +904,10 @@ export default function Home() {
                       );
                     })}
                   </div>
-                )}
-              </div>
-            )}
+                );
+              })()}
+            </div>
+          )}
 
             {/* TAB 2: BLACKLIST MANAGEMENT */}
             {adminTab === 'blacklist' && (

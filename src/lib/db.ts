@@ -509,11 +509,19 @@ export async function getBookings(filter?: {
           .lte('start_time', `${filter.date}T23:59:59Z`);
       }
       const { data, error } = await query;
-      if (!error && data) {
+      if (error) {
+        console.error('[getBookings] Supabase error:', error);
+        throw new Error(`Supabase query failed: ${error.message} (${error.code || ''})`);
+      }
+      if (data) {
         return data.map(mapRowToBooking);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.warn('Supabase getBookings fallback:', err);
+      if (filter?.all) {
+        // For admin requests, do not silently swallow Supabase query failures
+        throw err;
+      }
     }
   }
 
