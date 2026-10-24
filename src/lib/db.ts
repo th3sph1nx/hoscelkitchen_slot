@@ -1,4 +1,4 @@
-import { Booking, FacilityId, CurrentStatus, OtpRecord } from './types';
+import { Booking, FacilityId, CurrentStatus, BlacklistEntry, CooldownEntry, ADMIN_ROLL } from './types';
 import { getSupabaseServerClient } from './supabase';
 import { sendOtpEmail } from './email';
 
@@ -8,18 +8,27 @@ declare global {
   var __memoryBookings: Booking[] | undefined;
   // eslint-disable-next-line no-var
   var __memoryOtps: Map<string, { code: string; expiresAt: number; email: string }> | undefined;
+  // eslint-disable-next-line no-var
+  var __memoryBlacklist: Map<string, { reason: string; createdAt: string }> | undefined;
+  // eslint-disable-next-line no-var
+  var __memoryCooldowns: Map<string, { expiresAt: number; reason: string; createdAt: string }> | undefined;
 }
 
 if (!global.__memoryBookings) {
   global.__memoryBookings = [];
 }
-
 if (!global.__memoryOtps) {
   global.__memoryOtps = new Map();
 }
+if (!global.__memoryBlacklist) {
+  global.__memoryBlacklist = new Map();
+}
+if (!global.__memoryCooldowns) {
+  global.__memoryCooldowns = new Map();
+}
 
 /**
- * Validate NITPy 8-character alphanumeric roll number
+ * Validate NITPy 8-10 character alphanumeric roll number
  */
 export function validateRollNumber(input: string): { isValid: boolean; roll: string; email: string; error?: string } {
   const clean = input.trim().toUpperCase();
@@ -27,14 +36,14 @@ export function validateRollNumber(input: string): { isValid: boolean; roll: str
     return { isValid: false, roll: '', email: '', error: 'Roll number is required' };
   }
 
-  // Must be strictly 8 characters alphanumeric
-  const regex = /^[A-Z0-9]{8}$/;
+  // Must be 8 to 10 alphanumeric characters (e.g. CS21B101, CS25B1058)
+  const regex = /^[A-Z0-9]{8,10}$/;
   if (!regex.test(clean)) {
     return {
       isValid: false,
       roll: clean,
       email: '',
-      error: 'Roll number must be exactly 8 alphanumeric characters (e.g. CS21B101)',
+      error: 'Roll number must be 8-10 alphanumeric characters (e.g. CS21B101 or CS25B1058)',
     };
   }
 
@@ -52,14 +61,11 @@ export async function generateAndSendOtp(rollNumber: string): Promise<{ success:
   }
 
   const { roll, email } = validation;
-  // Generate cryptographically sensible 6-digit code
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-  // Store in memory cache
   global.__memoryOtps?.set(roll, { code, expiresAt, email });
 
-  // Store in Supabase if connected
   const client = getSupabaseServerClient();
   if (client) {
     try {
@@ -71,11 +77,10 @@ export async function generateAndSendOtp(rollNumber: string): Promise<{ success:
         expires_at: new Date(expiresAt).toISOString(),
       });
     } catch (err) {
-      console.warn('Could not store OTP in Supabase, using memory store:', err);
+      console.warn('Supabase OTP store error, fallback to memory:', err);
     }
   }
 
-  // Send email dispatch
   const dispatch = await sendOtpEmail({ email, rollNumber: roll, code });
   return { success: true, email, devOtp: dispatch.devOtp };
 }
@@ -91,7 +96,6 @@ export async function verifyOtp(rollNumber: string, inputCode: string): Promise<
 
   const now = Date.now();
 
-  // Try Supabase verification first
   const client = getSupabaseServerClient();
   if (client) {
     try {
@@ -104,7 +108,6 @@ export async function verifyOtp(rollNumber: string, inputCode: string): Promise<
         .maybeSingle();
 
       if (!error && data) {
-        // Delete used OTP
         await client.from('otps').delete().eq('id', data.id);
         global.__memoryOtps?.delete(roll);
         return true;
@@ -114,7 +117,6 @@ export async function verifyOtp(rollNumber: string, inputCode: string): Promise<
     }
   }
 
-  // Memory store fallback
   const record = global.__memoryOtps?.get(roll);
   if (record && record.code === code && record.expiresAt > now) {
     global.__memoryOtps?.delete(roll);
@@ -125,10 +127,143 @@ export async function verifyOtp(rollNumber: string, inputCode: string): Promise<
 }
 
 /**
- * Check if intervals overlap: startA < endB AND endA > startB
+ * Check if intervals overlap
  */
 function areOverlapping(startA: Date, endA: Date, startB: Date, endB: Date): boolean {
   return startA.getTime() < endB.getTime() && endA.getTime() > startB.getTime();
+}
+
+/**
+ * Blacklist Management
+ */
+export async function isRollBlacklisted(rollNumber: string): Promise<{ isBlacklisted: boolean; reason?: string }> {
+  const roll = rollNumber.trim().toUpperCase();
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data } = await client.from('blacklists').select('*').eq('roll_number', roll).maybeSingle();
+      if (data) return { isBlacklisted: true, reason: data.reason || 'Restricted by Admin' };
+    } catch {}
+  }
+
+  const mem = global.__memoryBlacklist?.get(roll);
+  if (mem) return { isBlacklisted: true, reason: mem.reason || 'Restricted by Admin' };
+  return { isBlacklisted: false };
+}
+
+export async function getBlacklist(): Promise<BlacklistEntry[]> {
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data } = await client.from('blacklists').select('*').order('created_at', { ascending: false });
+      if (data) return data as BlacklistEntry[];
+    } catch {}
+  }
+
+  const list: BlacklistEntry[] = [];
+  global.__memoryBlacklist?.forEach((v, k) => {
+    list.push({ id: k, roll_number: k, reason: v.reason, created_at: v.createdAt });
+  });
+  return list;
+}
+
+export async function addToBlacklist(rollNumber: string, reason: string = ''): Promise<void> {
+  const roll = rollNumber.trim().toUpperCase();
+  const now = new Date().toISOString();
+  global.__memoryBlacklist?.set(roll, { reason, createdAt: now });
+
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      await client.from('blacklists').upsert({ roll_number: roll, reason });
+    } catch {}
+  }
+}
+
+export async function removeFromBlacklist(rollNumber: string): Promise<void> {
+  const roll = rollNumber.trim().toUpperCase();
+  global.__memoryBlacklist?.delete(roll);
+
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      await client.from('blacklists').delete().eq('roll_number', roll);
+    } catch {}
+  }
+}
+
+/**
+ * Cooldown Management
+ */
+export async function getRollCooldown(rollNumber: string): Promise<{ onCooldown: boolean; expiresAt?: string; reason?: string }> {
+  const roll = rollNumber.trim().toUpperCase();
+  const now = new Date().toISOString();
+
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data } = await client
+        .from('cooldowns')
+        .select('*')
+        .eq('roll_number', roll)
+        .gt('expires_at', now)
+        .maybeSingle();
+      if (data) return { onCooldown: true, expiresAt: data.expires_at, reason: data.reason };
+    } catch {}
+  }
+
+  const mem = global.__memoryCooldowns?.get(roll);
+  if (mem && mem.expiresAt > Date.now()) {
+    return { onCooldown: true, expiresAt: new Date(mem.expiresAt).toISOString(), reason: mem.reason };
+  }
+  return { onCooldown: false };
+}
+
+export async function getCooldowns(): Promise<CooldownEntry[]> {
+  const now = new Date().toISOString();
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data } = await client.from('cooldowns').select('*').gt('expires_at', now).order('expires_at', { ascending: true });
+      if (data) return data as CooldownEntry[];
+    } catch {}
+  }
+
+  const list: CooldownEntry[] = [];
+  global.__memoryCooldowns?.forEach((v, k) => {
+    if (v.expiresAt > Date.now()) {
+      list.push({ id: k, roll_number: k, expires_at: new Date(v.expiresAt).toISOString(), reason: v.reason, created_at: v.createdAt });
+    }
+  });
+  return list;
+}
+
+export async function setCooldown(rollNumber: string, hours: number, reason: string = ''): Promise<void> {
+  const roll = rollNumber.trim().toUpperCase();
+  const expiresAt = Date.now() + hours * 60 * 60 * 1000;
+  const isoExpires = new Date(expiresAt).toISOString();
+  const now = new Date().toISOString();
+
+  global.__memoryCooldowns?.set(roll, { expiresAt, reason, createdAt: now });
+
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      await client.from('cooldowns').upsert({ roll_number: roll, expires_at: isoExpires, reason });
+    } catch {}
+  }
+}
+
+export async function removeCooldown(rollNumber: string): Promise<void> {
+  const roll = rollNumber.trim().toUpperCase();
+  global.__memoryCooldowns?.delete(roll);
+
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      await client.from('cooldowns').delete().eq('roll_number', roll);
+    } catch {}
+  }
 }
 
 /**
@@ -152,7 +287,6 @@ export async function checkSlotAvailability(
     return { isAvailable: false, conflicts: [], reason: 'Start time must be before end time.' };
   }
 
-  // Max 3 consecutive hours constraint
   const durationHours = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
   if (durationHours > 3.01) {
     return {
@@ -162,7 +296,6 @@ export async function checkSlotAvailability(
     };
   }
 
-  // Query Supabase for conflicts
   const client = getSupabaseServerClient();
   if (client) {
     try {
@@ -199,7 +332,6 @@ export async function checkSlotAvailability(
     }
   }
 
-  // Memory fallback
   const conflicts = (global.__memoryBookings || []).filter(
     (b) =>
       b.facility_id === facilityId &&
@@ -223,7 +355,7 @@ export async function checkSlotAvailability(
 }
 
 /**
- * Atomic booking creation with backend slot verification
+ * Atomic booking creation with backend slot verification, blacklist, and cooldown checks
  */
 export async function createBooking(input: {
   facility_id: FacilityId;
@@ -236,6 +368,19 @@ export async function createBooking(input: {
   const validation = validateRollNumber(input.roll_number);
   if (!validation.isValid) {
     throw new Error(validation.error);
+  }
+
+  // 1. BACKEND BLACKLIST CHECK
+  const blacklisted = await isRollBlacklisted(validation.roll);
+  if (blacklisted.isBlacklisted) {
+    throw new Error(`Your roll number (${validation.roll}) has been blacklisted by Admin (${ADMIN_ROLL}). Reason: ${blacklisted.reason}`);
+  }
+
+  // 2. BACKEND COOLDOWN CHECK
+  const cooldown = await getRollCooldown(validation.roll);
+  if (cooldown.onCooldown) {
+    const formattedExpiry = new Date(cooldown.expiresAt!).toLocaleString();
+    throw new Error(`Your roll number (${validation.roll}) is on cooldown until ${formattedExpiry}. Reason: ${cooldown.reason || 'None specified'}`);
   }
 
   const start = new Date(input.start_time);
@@ -253,7 +398,7 @@ export async function createBooking(input: {
     throw new Error('Cannot book past time slots');
   }
 
-  // Backend slot check
+  // 3. BACKEND SLOT CHECK
   const availability = await checkSlotAvailability(input.facility_id, input.start_time, input.end_time);
   if (!availability.isAvailable) {
     throw new Error(availability.reason || 'This time slot is already booked.');
@@ -301,17 +446,70 @@ export async function createBooking(input: {
 }
 
 /**
- * Get all confirmed bookings for a date or facility
+ * Admin: Change timing of a slot with backend conflict check
+ */
+export async function updateBookingTiming(bookingId: string, newStartTime: string, newEndTime: string): Promise<Booking> {
+  const start = new Date(newStartTime);
+  const end = new Date(newEndTime);
+
+  if (isNaN(start.getTime()) || isNaN(end.getTime())) throw new Error('Invalid date format');
+  if (start >= end) throw new Error('Start time must be before end time');
+
+  // Find booking
+  let existing: Booking | null = null;
+  const client = getSupabaseServerClient();
+  if (client) {
+    try {
+      const { data } = await client.from('bookings').select('*').or(`id.eq.${bookingId},booking_code.eq.${bookingId}`).single();
+      if (data) existing = data as Booking;
+    } catch {}
+  }
+
+  if (!existing) {
+    existing = (global.__memoryBookings || []).find((b) => b.id === bookingId || b.booking_code === bookingId) || null;
+  }
+
+  if (!existing) throw new Error('Booking not found');
+
+  // Verify that new slot timing is free (excluding this booking)
+  const check = await checkSlotAvailability(existing.facility_id, newStartTime, newEndTime, existing.id);
+  if (!check.isAvailable) {
+    throw new Error(check.reason || 'New timing conflicts with another existing booking.');
+  }
+
+  // Update in Supabase
+  if (client) {
+    try {
+      const { data, error } = await client
+        .from('bookings')
+        .update({ start_time: newStartTime, end_time: newEndTime })
+        .eq('id', existing.id)
+        .select()
+        .single();
+      if (!error && data) return data as Booking;
+    } catch {}
+  }
+
+  // Update in memory
+  existing.start_time = newStartTime;
+  existing.end_time = newEndTime;
+  return existing;
+}
+
+/**
+ * Get all confirmed bookings
  */
 export async function getBookings(filter?: {
   facility_id?: FacilityId;
-  date?: string; // YYYY-MM-DD
+  date?: string;
   roll_number?: string;
+  all?: boolean; // admin can view all including cancelled
 }): Promise<Booking[]> {
   const client = getSupabaseServerClient();
   if (client) {
     try {
       let query = client.from('bookings').select('*').order('start_time', { ascending: true });
+      if (!filter?.all) query = query.eq('status', 'confirmed');
       if (filter?.facility_id) query = query.eq('facility_id', filter.facility_id);
       if (filter?.roll_number) query = query.eq('roll_number', filter.roll_number.toUpperCase());
       if (filter?.date) {
@@ -327,6 +525,7 @@ export async function getBookings(filter?: {
   }
 
   let list = global.__memoryBookings || [];
+  if (!filter?.all) list = list.filter((b) => b.status === 'confirmed');
   if (filter?.facility_id) list = list.filter((b) => b.facility_id === filter.facility_id);
   if (filter?.roll_number) {
     list = list.filter((b) => b.roll_number.toUpperCase() === filter.roll_number?.toUpperCase());
@@ -373,10 +572,12 @@ export async function getCurrentFacilityStatus(): Promise<CurrentStatus> {
 }
 
 /**
- * Cancel booking
+ * Cancel or delete booking
  */
 export async function cancelBooking(idOrCode: string, rollNumber?: string): Promise<boolean> {
   const client = getSupabaseServerClient();
+  const isAdmin = rollNumber?.toUpperCase() === ADMIN_ROLL;
+
   if (client) {
     try {
       let query = client.from('bookings').update({ status: 'cancelled' });
@@ -385,7 +586,7 @@ export async function cancelBooking(idOrCode: string, rollNumber?: string): Prom
       } else {
         query = query.eq('id', idOrCode);
       }
-      if (rollNumber) {
+      if (rollNumber && !isAdmin) {
         query = query.eq('roll_number', rollNumber.toUpperCase());
       }
       const { error } = await query;
@@ -399,7 +600,7 @@ export async function cancelBooking(idOrCode: string, rollNumber?: string): Prom
   const item = list.find(
     (b) =>
       (b.id === idOrCode || b.booking_code === idOrCode.toUpperCase()) &&
-      (!rollNumber || b.roll_number === rollNumber.toUpperCase())
+      (!rollNumber || isAdmin || b.roll_number === rollNumber.toUpperCase())
   );
   if (item) {
     item.status = 'cancelled';

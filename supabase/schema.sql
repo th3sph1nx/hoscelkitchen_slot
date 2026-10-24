@@ -1,4 +1,4 @@
--- NIT Puducherry Hostel Amenities Booking Schema
+-- NIT Puducherry Ganga Hostel Amenities Booking Schema
 -- PostgreSQL Exclusion Constraint prevents double bookings at database level
 
 CREATE EXTENSION IF NOT EXISTS "btree_gist";
@@ -47,13 +47,34 @@ CREATE TABLE IF NOT EXISTS otps (
     created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
 );
 
+-- Blacklisted roll numbers
+CREATE TABLE IF NOT EXISTS blacklists (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    roll_number TEXT NOT NULL UNIQUE,
+    reason TEXT DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
+-- Roll number cooldowns
+CREATE TABLE IF NOT EXISTS cooldowns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    roll_number TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    reason TEXT DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc'::text, now())
+);
+
 CREATE INDEX IF NOT EXISTS idx_bookings_facility_time ON bookings (facility_id, start_time, end_time);
 CREATE INDEX IF NOT EXISTS idx_bookings_roll ON bookings (roll_number);
 CREATE INDEX IF NOT EXISTS idx_otps_roll_code ON otps (roll_number, code);
+CREATE INDEX IF NOT EXISTS idx_blacklists_roll ON blacklists (roll_number);
+CREATE INDEX IF NOT EXISTS idx_cooldowns_roll ON cooldowns (roll_number);
 
 -- Row Level Security
 ALTER TABLE bookings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE otps ENABLE ROW LEVEL SECURITY;
+ALTER TABLE blacklists ENABLE ROW LEVEL SECURITY;
+ALTER TABLE cooldowns ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY "Public read bookings" ON bookings FOR SELECT USING (true);
 CREATE POLICY "Public insert bookings" ON bookings FOR INSERT WITH CHECK (true);
@@ -62,3 +83,9 @@ CREATE POLICY "Public update bookings" ON bookings FOR UPDATE USING (true);
 CREATE POLICY "Public insert otps" ON otps FOR INSERT WITH CHECK (true);
 CREATE POLICY "Public read otps" ON otps FOR SELECT USING (true);
 CREATE POLICY "Public delete otps" ON otps FOR DELETE USING (true);
+
+CREATE POLICY "Public read blacklists" ON blacklists FOR SELECT USING (true);
+CREATE POLICY "Public write blacklists" ON blacklists FOR ALL USING (true);
+
+CREATE POLICY "Public read cooldowns" ON cooldowns FOR SELECT USING (true);
+CREATE POLICY "Public write cooldowns" ON cooldowns FOR ALL USING (true);

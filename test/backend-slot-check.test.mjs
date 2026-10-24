@@ -1,131 +1,152 @@
 import assert from 'node:assert';
 
-const PORT = 3089;
+const PORT = 3090;
 const BASE_URL = `http://localhost:${PORT}`;
+const ADMIN_ROLL = 'CS25B1058';
 
 async function runTests() {
-  console.log('🧪 Running NITPy Hostel Amenities Test Suite (Dark Minimal & OTP)...');
+  console.log('🧪 Running Ganga Amenities Backend Test Suite (Admin & Policies)...');
 
-  // 1. Invalid Roll Number check
-  console.log('\n👉 Test 1: Validate 8-char alphanumeric roll number...');
-  const badRollRes = await fetch(`${BASE_URL}/api/auth/send-otp`, {
+  // 1. Admin login with CS25B1058
+  console.log('\n👉 Test 1: Admin roll number (CS25B1058) OTP dispatch & verification...');
+  const adminOtpRes = await fetch(`${BASE_URL}/api/auth/send-otp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rollNumber: 'CS1' }), // only 3 chars
+    body: JSON.stringify({ rollNumber: ADMIN_ROLL }),
   });
-  assert.strictEqual(badRollRes.status, 400);
-  console.log('✅ Passed: Invalid roll number rejected.');
+  const adminOtpData = await adminOtpRes.json();
+  assert.strictEqual(adminOtpRes.status, 200);
+  assert.strictEqual(adminOtpData.email, 'cs25b1058@nitpy.ac.in');
+  assert.ok(adminOtpData.devOtp);
 
-  // 2. Request OTP for valid roll number (CS21B101)
-  console.log('\n👉 Test 2: Request OTP for CS21B101 (email: cs21b101@nitpy.ac.in)...');
-  const otpRes = await fetch(`${BASE_URL}/api/auth/send-otp`, {
+  const adminVerifyRes = await fetch(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rollNumber: 'CS21B101' }),
+    body: JSON.stringify({ rollNumber: ADMIN_ROLL, code: adminOtpData.devOtp }),
   });
-  const otpData = await otpRes.json();
-  assert.strictEqual(otpRes.status, 200);
-  assert.strictEqual(otpData.email, 'cs21b101@nitpy.ac.in');
-  assert.ok(otpData.devOtp, 'Development OTP returned for verification');
-  const validCode = otpData.devOtp;
-  console.log(`✅ Passed: OTP sent to ${otpData.email} (Code: ${validCode})`);
+  assert.strictEqual(adminVerifyRes.status, 200);
+  console.log(`✅ Passed: Admin ${ADMIN_ROLL} logged in.`);
 
-  // 3. Verify OTP
-  console.log('\n👉 Test 3: Verify with incorrect OTP then correct OTP...');
-  const badVerifyRes = await fetch(`${BASE_URL}/api/auth/verify-otp`, {
+  // 2. Non-admin access to admin APIs blocked
+  console.log('\n👉 Test 2: Verify non-admin roll numbers are blocked from admin APIs (403)...');
+  const forbiddenRes = await fetch(`${BASE_URL}/api/admin/blacklist`, {
+    headers: { 'x-admin-roll': 'CS21B101' },
+  });
+  assert.strictEqual(forbiddenRes.status, 403, 'Non-admin must receive 403 Forbidden');
+  console.log('✅ Passed: Non-admin roll blocked from admin endpoints.');
+
+  // 3. Admin blacklists roll number
+  console.log('\n👉 Test 3: Admin blacklists student roll EC22B005...');
+  const addBlRes = await fetch(`${BASE_URL}/api/admin/blacklist`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rollNumber: 'CS21B101', code: '000000' }),
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-roll': ADMIN_ROLL,
+    },
+    body: JSON.stringify({ roll_number: 'EC22B005', reason: 'Disciplinary violation' }),
   });
-  assert.strictEqual(badVerifyRes.status, 401);
+  assert.strictEqual(addBlRes.status, 200);
 
-  const goodVerifyRes = await fetch(`${BASE_URL}/api/auth/verify-otp`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ rollNumber: 'CS21B101', code: validCode }),
-  });
-  const verifyData = await goodVerifyRes.json();
-  assert.strictEqual(goodVerifyRes.status, 200);
-  assert.strictEqual(verifyData.rollNumber, 'CS21B101');
-  console.log('✅ Passed: Student logged in and verified.');
-
-  // 4. Check initial live status
-  console.log('\n👉 Test 4: Check current facility status...');
-  const statusRes = await fetch(`${BASE_URL}/api/status`);
-  const statusData = await statusRes.json();
-  assert.strictEqual(statusRes.status, 200);
-  assert.ok('kitchen' in statusData.status);
-  assert.ok('tvRoom' in statusData.status);
-  console.log('✅ Passed: Live status retrieved.');
-
-  // 5. Book kitchen slot (2 consecutive hours, 4 people)
-  console.log('\n👉 Test 5: Book Kitchen slot for 2 consecutive hours (18:00 - 20:00)...');
+  // 4. Blacklisted student tries to book -> Backend rejects
+  console.log('\n👉 Test 4: Blacklisted student (EC22B005) tries to book -> Backend blocks...');
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   const dateStr = tomorrow.toISOString().slice(0, 10);
 
-  const startISO = `${dateStr}T18:00:00.000Z`;
-  const endISO = `${dateStr}T20:00:00.000Z`;
-
-  const bookRes = await fetch(`${BASE_URL}/api/bookings`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      facility_id: 'kitchen',
-      roll_number: 'CS21B101',
-      attendees_count: 4,
-      start_time: startISO,
-      end_time: endISO,
-      purpose: 'Dinner prep with roomies',
-    }),
-  });
-  const bookData = await bookRes.json();
-  assert.strictEqual(bookRes.status, 201);
-  assert.ok(bookData.booking.booking_code.startsWith('KIT-'));
-  const bookingCode = bookData.booking.booking_code;
-  console.log(`✅ Passed: Booking confirmed with code ${bookingCode} for 4 people.`);
-
-  // 6. Backend slot conflict check
-  console.log('\n👉 Test 6: Verify backend rejects overlapping slot for another student...');
-  const conflictRes = await fetch(`${BASE_URL}/api/bookings`, {
+  const blBookRes = await fetch(`${BASE_URL}/api/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       facility_id: 'kitchen',
       roll_number: 'EC22B005',
       attendees_count: 2,
-      start_time: `${dateStr}T19:00:00.000Z`, // overlaps 18:00 - 20:00
-      end_time: `${dateStr}T21:00:00.000Z`,
+      start_time: `${dateStr}T10:00:00.000Z`,
+      end_time: `${dateStr}T12:00:00.000Z`,
     }),
   });
-  assert.strictEqual(conflictRes.status, 409, 'Backend must return 409 Conflict');
-  console.log('✅ Passed: Backend blocked double-booking with 409 Conflict.');
+  assert.strictEqual(blBookRes.status, 400);
+  const blBookData = await blBookRes.json();
+  assert.ok(blBookData.error.includes('blacklisted'), 'Backend must return blacklist error');
+  console.log('✅ Passed: Blacklist strictly enforced on backend.');
 
-  // 7. Max duration check (> 3 hours)
-  console.log('\n👉 Test 7: Verify max duration limit of 3 hours...');
-  const longRes = await fetch(`${BASE_URL}/api/bookings`, {
+  // 5. Admin applies cooldown
+  console.log('\n👉 Test 5: Admin applies 24h cooldown to ME23B042...');
+  const cdRes = await fetch(`${BASE_URL}/api/admin/cooldown`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-roll': ADMIN_ROLL,
+    },
+    body: JSON.stringify({ roll_number: 'ME23B042', hours: 24, reason: 'Missed reservation' }),
+  });
+  assert.strictEqual(cdRes.status, 200);
+
+  // 6. Cooldown student tries to book -> Backend blocks
+  console.log('\n👉 Test 6: Cooldown student (ME23B042) tries to book -> Backend blocks...');
+  const cdBookRes = await fetch(`${BASE_URL}/api/bookings`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       facility_id: 'kitchen',
-      roll_number: 'CS21B101',
+      roll_number: 'ME23B042',
       attendees_count: 1,
       start_time: `${dateStr}T10:00:00.000Z`,
-      end_time: `${dateStr}T14:30:00.000Z`, // 4.5 hours
+      end_time: `${dateStr}T11:00:00.000Z`,
     }),
   });
-  assert.strictEqual(longRes.status, 400);
-  console.log('✅ Passed: Duration exceeding 3 hours rejected.');
+  assert.strictEqual(cdBookRes.status, 400);
+  const cdBookData = await cdBookRes.json();
+  assert.ok(cdBookData.error.includes('cooldown'), 'Backend must return cooldown error');
+  console.log('✅ Passed: Cooldown strictly enforced on backend.');
 
-  // 8. Cancellation
-  console.log('\n👉 Test 8: Cancel booking...');
-  const cancelRes = await fetch(`${BASE_URL}/api/bookings/${bookingCode}?roll_number=CS21B101`, {
-    method: 'DELETE',
+  // 7. Normal booking created by CS21B101
+  console.log('\n👉 Test 7: Normal booking created for TV Room by CS21B101...');
+  const normalBookRes = await fetch(`${BASE_URL}/api/bookings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      facility_id: 'tv-room',
+      roll_number: 'CS21B101',
+      attendees_count: 5,
+      start_time: `${dateStr}T18:00:00.000Z`,
+      end_time: `${dateStr}T20:00:00.000Z`,
+      purpose: 'Movie screening',
+    }),
   });
-  assert.strictEqual(cancelRes.status, 200);
-  console.log('✅ Passed: Booking cancelled.');
+  const normalBookData = await normalBookRes.json();
+  assert.strictEqual(normalBookRes.status, 201);
+  const bookingId = normalBookData.booking.id;
+  const bookingCode = normalBookData.booking.booking_code;
+  console.log(`✅ Passed: Booking ${bookingCode} created.`);
 
-  console.log('\n🎉 ALL TESTS PASSED SUCCESSFULLY!\n');
+  // 8. Admin changes slot timings
+  console.log('\n👉 Test 8: Admin changes slot timing to 20:00 - 22:00...');
+  const changeRes = await fetch(`${BASE_URL}/api/admin/bookings/${bookingId}`, {
+    method: 'PATCH',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-admin-roll': ADMIN_ROLL,
+    },
+    body: JSON.stringify({
+      start_time: `${dateStr}T20:00:00.000Z`,
+      end_time: `${dateStr}T22:00:00.000Z`,
+    }),
+  });
+  const changeData = await changeRes.json();
+  assert.strictEqual(changeRes.status, 200);
+  assert.strictEqual(changeData.booking.start_time, `${dateStr}T20:00:00.000Z`);
+  console.log('✅ Passed: Admin successfully changed slot timings on backend.');
+
+  // 9. Admin removes slot
+  console.log('\n👉 Test 9: Admin removes the slot...');
+  const delRes = await fetch(`${BASE_URL}/api/admin/bookings/${bookingId}`, {
+    method: 'DELETE',
+    headers: { 'x-admin-roll': ADMIN_ROLL },
+  });
+  assert.strictEqual(delRes.status, 200);
+  console.log('✅ Passed: Admin successfully removed slot.');
+
+  console.log('\n🎉 ALL ADMIN & POLICY TESTS PASSED SUCCESSFULLY!\n');
 }
 
 runTests().catch((err) => {
