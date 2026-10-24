@@ -23,6 +23,14 @@ export async function GET(req: NextRequest) {
     const directRes = client ? await client.from('bookings').select('*').order('start_time', { ascending: true }) : null;
     const bookings = await getBookings({ all: true, roll_number });
 
+    let keyPayload = null;
+    try {
+      const k = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (k && k.includes('.')) {
+        keyPayload = JSON.parse(Buffer.from(k.split('.')[1], 'base64').toString());
+      }
+    } catch {}
+
     return NextResponse.json({
       bookings,
       count: bookings.length,
@@ -30,6 +38,7 @@ export async function GET(req: NextRequest) {
       directError: directRes?.error,
       hasClient: Boolean(client),
       supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || 'default',
+      keyPayload,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message, stack: err.stack }, { status: 500 });
