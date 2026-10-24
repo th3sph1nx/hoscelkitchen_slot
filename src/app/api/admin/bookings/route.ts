@@ -29,6 +29,7 @@ export async function GET(req: NextRequest) {
       directCount: directRes?.data?.length,
       directError: directRes?.error,
       hasClient: Boolean(client),
+      supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || 'default',
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message, stack: err.stack }, { status: 500 });
