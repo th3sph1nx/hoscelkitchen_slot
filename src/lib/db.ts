@@ -94,7 +94,7 @@ export function verifyOtpSignature(roll: string, code: string, ticket: string): 
  */
 export async function generateAndSendOtp(
   rollNumber: string
-): Promise<{ success: boolean; email: string; devOtp?: string; ticket: string; sentVia?: string }> {
+): Promise<{ success: boolean; email: string; ticket: string; sentVia?: string }> {
   const validation = validateRollNumber(rollNumber);
   if (!validation.isValid) {
     throw new Error(validation.error);
@@ -108,10 +108,13 @@ export async function generateAndSendOtp(
   const ticket = createOtpSignature(roll, code, expiresAt);
 
   const dispatch = await sendOtpEmail({ email, rollNumber: roll, code });
+  if (!dispatch.success) {
+    throw new Error(dispatch.error || 'Failed to dispatch verification email');
+  }
+
   return {
     success: true,
     email,
-    devOtp: dispatch.devOtp,
     ticket,
     sentVia: dispatch.sentVia,
   };

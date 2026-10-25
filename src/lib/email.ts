@@ -1,6 +1,6 @@
 /**
  * Email dispatcher for college OTP verification
- * Supports Gmail SMTP (Nodemailer), Resend API, or local dev bypass
+ * Sends 6-digit verification passcode directly via Gmail SMTP
  */
 
 import nodemailer from 'nodemailer';
@@ -15,20 +15,16 @@ export async function sendOtpEmail({
   email,
   rollNumber,
   code,
-}: SendOtpParams): Promise<{ success: boolean; devOtp?: string; sentVia?: string; error?: string }> {
+}: SendOtpParams): Promise<{ success: boolean; sentVia?: string; error?: string }> {
   const gmailUser = (process.env.GMAIL_USER || process.env.SMTP_USER || '').trim();
   const gmailPass = (process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS || process.env.GMAIL_PASS || '')
     .trim()
     .replace(/\s+/g, '');
   const resendApiKey = process.env.RESEND_API_KEY;
 
-  console.log(`\n======================================================`);
-  console.log(`🔑 [OTP DISPATCH] To: ${email} (Roll: ${rollNumber})`);
-  console.log(`🔢 Verification Code: ${code}`);
-  console.log(`⏱️  Valid for: 10 minutes`);
-  console.log(`======================================================\n`);
+  console.log(`[OTP DISPATCH] Sending to ${email} (Roll: ${rollNumber})`);
 
-  // 1. Prioritize Gmail SMTP
+  // 1. Gmail SMTP (Primary)
   if (gmailUser && gmailPass) {
     try {
       const transporter = nodemailer.createTransport({
@@ -76,11 +72,11 @@ export async function sendOtpEmail({
       return { success: true, sentVia: 'gmail-smtp' };
     } catch (err: any) {
       console.error('[Gmail SMTP] Failed to send email:', err.message);
-      return { success: false, devOtp: code, error: err.message };
+      return { success: false, error: err.message };
     }
   }
 
-  // 2. Resend API (if configured)
+  // 2. Resend API (Fallback if configured)
   if (resendApiKey) {
     try {
       const response = await fetch('https://api.resend.com/emails', {
@@ -93,20 +89,20 @@ export async function sendOtpEmail({
           from: process.env.RESEND_FROM || 'NITPy Hostel <onboarding@resend.dev>',
           to: [email],
           subject: `${code} is your Ganga Hostel Login Code`,
-          html: `<div style="padding: 20px; font-family: monospace;">Your code is: <strong>${code}</strong></div>`,
+          html: `<div style="padding: 20px; font-family: monospace;">Your verification code is: <strong>${code}</strong></div>`,
         }),
       });
 
       if (response.ok) {
         return { success: true, sentVia: 'resend' };
       }
-    } catch (err) {}
+    } catch (err: any) {
+      console.error('[Resend] Failed to send email:', err.message);
+    }
   }
 
-  // 3. Fallback dev mode
   return {
-    success: true,
-    devOtp: code,
-    sentVia: 'local-dispatch',
+    success: false,
+    error: 'Email service credentials not configured. Please contact the administrator.',
   };
 }

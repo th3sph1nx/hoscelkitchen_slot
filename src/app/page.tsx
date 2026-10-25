@@ -51,9 +51,7 @@ export default function Home() {
   const [otpSent, setOtpSent] = useState<boolean>(false);
   const [authLoading, setAuthLoading] = useState<boolean>(false);
   const [authMsg, setAuthMsg] = useState<{ text: string; isError: boolean } | null>(null);
-  const [devOtpCode, setDevOtpCode] = useState<string | null>(null);
   const [otpTicket, setOtpTicket] = useState<string | null>(null);
-  const [isRateLimited, setIsRateLimited] = useState<boolean>(false);
 
   // Booking Form State
   const [facility, setFacility] = useState<FacilityId>('kitchen');
@@ -281,11 +279,10 @@ export default function Home() {
     };
   }, [facility, selectedDate, startHour, durationHours]);
 
-  // Request Supabase OTP
+  // Request verification passcode
   const handleSendOtp = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthMsg(null);
-    setDevOtpCode(null);
 
     const roll = loginRollInput.trim().toUpperCase();
     if (!/^[A-Z0-9]{8,10}$/.test(roll)) {
@@ -304,46 +301,29 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error);
 
       setOtpSent(true);
-      setIsRateLimited(Boolean(data.rateLimited));
       if (data.ticket) {
         setOtpTicket(data.ticket);
       }
-      if (data.devOtp) {
-        setDevOtpCode(data.devOtp);
-        setOtpInput(data.devOtp); // Auto-fill so student is never stuck!
-      }
 
-      if (data.provider === 'gmail-smtp') {
-        setAuthMsg({
-          text: `Passcode sent directly to ${data.email} via Gmail SMTP. Please check your inbox!`,
-          isError: false,
-        });
-      } else if (data.rateLimited) {
-        setAuthMsg({
-          text: 'Supabase free quota reached (3 emails/hr). Your instant bypass code is auto-filled below.',
-          isError: false,
-        });
-      } else {
-        setAuthMsg({
-          text: `OTP passcode dispatched to ${data.email}. Check inbox & Spam folder.`,
-          isError: false,
-        });
-      }
+      setAuthMsg({
+        text: `A 6-digit passcode has been sent to ${data.email}. Please check your inbox.`,
+        isError: false,
+      });
     } catch (err: any) {
-      setAuthMsg({ text: err.message || 'Failed to send OTP', isError: true });
+      setAuthMsg({ text: err.message || 'Failed to send verification code', isError: true });
     } finally {
       setAuthLoading(false);
     }
   };
 
-  // Verify Supabase OTP
-  const handleVerifyOtp = async (e?: React.FormEvent, customCode?: string) => {
+  // Verify verification passcode
+  const handleVerifyOtp = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthMsg(null);
 
-    const codeToVerify = (customCode || otpInput || devOtpCode || '').trim();
+    const codeToVerify = otpInput.trim();
     if (!codeToVerify) {
-      setAuthMsg({ text: 'Please enter the verification code', isError: true });
+      setAuthMsg({ text: 'Please enter the 6-digit verification code', isError: true });
       return;
     }
 
@@ -369,9 +349,7 @@ export default function Home() {
       setOtpSent(false);
       setLoginRollInput('');
       setOtpInput('');
-      setDevOtpCode(null);
       setOtpTicket(null);
-      setIsRateLimited(false);
     } catch (err: any) {
       setAuthMsg({ text: err.message || 'Invalid or expired OTP', isError: true });
     } finally {
@@ -673,7 +651,7 @@ export default function Home() {
         <div className="border border-zinc-800 bg-zinc-900/60 p-4 rounded-lg space-y-3">
           <div className="text-zinc-300 font-bold uppercase tracking-wider text-xs flex items-center justify-between">
             <span>Student / Admin Login (College ID)</span>
-            <span className="text-[10px] text-sky-400 font-normal">Supabase Auth Free Tier</span>
+            <span className="text-[10px] text-zinc-500 font-mono">NIT Puducherry</span>
           </div>
 
           {!otpSent ? (
@@ -696,59 +674,26 @@ export default function Home() {
                 </button>
               </div>
               <p className="text-[11px] text-zinc-500">
-                OTP will be sent to{' '}
+                A 6-digit verification code will be sent to{' '}
                 <span className="text-zinc-400 font-semibold">
                   {loginRollInput ? `${loginRollInput.toLowerCase()}@nitpy.ac.in` : 'xxxxx@nitpy.ac.in'}
-                </span>{' '}
-                via Supabase.
+                </span>
               </p>
             </form>
           ) : (
             <div className="space-y-3">
-              {isRateLimited ? (
-                <div className="p-3.5 bg-amber-950/40 border border-amber-600/70 rounded-lg space-y-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-amber-300">⚠️ Supabase Hourly Limit Reached (3/hr)</span>
-                    <span className="text-[10px] text-amber-400 font-mono font-bold">Instant Bypass Active</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-300">
-                    Supabase&apos;s default free SMTP limits projects to 3 emails/hour. To prevent you from getting stuck, an instant verification code has been generated:
-                  </p>
-                  <div className="flex items-center justify-between bg-zinc-950 p-2.5 rounded border border-amber-900/80">
-                    <div>
-                      <span className="text-zinc-500 text-[10px] uppercase tracking-wider block">One-Time Code:</span>
-                      <span className="text-xl font-bold font-mono tracking-widest text-amber-400">{devOtpCode}</span>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={authLoading}
-                      onClick={() => handleVerifyOtp(undefined, devOtpCode || undefined)}
-                      className="px-3 py-1.5 bg-amber-400 hover:bg-amber-300 text-zinc-950 font-bold rounded text-xs transition-colors"
-                    >
-                      {authLoading ? 'Verifying...' : '⚡ Auto-fill & Log In'}
-                    </button>
-                  </div>
-                  <p className="text-[10px] text-zinc-400">
-                    💡 To send real emails to all students, enable <strong>Custom SMTP</strong> in Supabase Settings (e.g. Resend or Gmail) to lift the 3/hr limit.
-                  </p>
+              <div className="p-3 bg-zinc-950 border border-zinc-800 rounded space-y-1.5 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-zinc-200">Verification Code Sent</span>
+                  <span className="text-[10px] text-emerald-400 font-mono">● Active</span>
                 </div>
-              ) : (
-                <div className="p-3 bg-zinc-950 border border-zinc-800 rounded space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-semibold text-zinc-200">Email Dispatched</span>
-                    <span className="text-[10px] text-sky-400 animate-pulse font-mono">Waiting for link click or OTP...</span>
-                  </div>
-                  <p className="text-[11px] text-zinc-400">
-                    Supabase sent an email to <span className="text-zinc-200 font-semibold">{loginRollInput.toLowerCase()}@nitpy.ac.in</span>.
-                  </p>
-                  <p className="text-[11px] text-emerald-400/90 font-medium">
-                    👉 Click the <strong className="underline">Log In</strong> button in the email to log in automatically, or enter the 6-digit code below:
-                  </p>
-                  <p className="text-[10px] text-zinc-500">
-                    Note: If not in inbox, please check your <strong>Spam / Junk</strong> folder.
-                  </p>
-                </div>
-              )}
+                <p className="text-[11px] text-zinc-400">
+                  We sent a 6-digit passcode to <span className="text-zinc-200 font-semibold">{loginRollInput.toLowerCase()}@nitpy.ac.in</span>.
+                </p>
+                <p className="text-[10px] text-zinc-500">
+                  Please check your inbox or Spam/Junk folder and enter the code below (valid for 10 minutes).
+                </p>
+              </div>
 
               <form onSubmit={handleVerifyOtp} className="space-y-2.5">
                 <div className="flex gap-2">
@@ -769,25 +714,12 @@ export default function Home() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setOtpSent(false); setAuthMsg(null); setIsRateLimited(false); }}
+                    onClick={() => { setOtpSent(false); setAuthMsg(null); }}
                     className="bg-zinc-800 text-zinc-300 px-3 py-2 rounded hover:bg-zinc-700"
                   >
                     Back
                   </button>
                 </div>
-
-                {devOtpCode && !isRateLimited && (
-                  <div className="text-[11px] bg-zinc-800/80 border border-zinc-700 p-2 rounded text-zinc-300 flex items-center justify-between">
-                    <span>Dev Code: <strong className="text-sky-400 font-mono tracking-widest">{devOtpCode}</strong></span>
-                    <button
-                      type="button"
-                      onClick={() => handleVerifyOtp(undefined, devOtpCode)}
-                      className="text-[10px] text-sky-400 hover:underline"
-                    >
-                      Use code
-                    </button>
-                  </div>
-                )}
               </form>
             </div>
           )}
