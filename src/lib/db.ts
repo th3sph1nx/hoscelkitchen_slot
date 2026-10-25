@@ -66,7 +66,7 @@ export function validateRollNumber(input: string): { isValid: boolean; roll: str
  * Generate HMAC signature for stateless serverless OTP verification
  */
 export function createOtpSignature(roll: string, code: string, expiry: number): string {
-  const secret = process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'nitpy-ganga-auth-secret';
+  const secret = process.env.SESSION_SECRET || process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'nitpy-ganga-auth-secret';
   const data = `${roll.toUpperCase()}:${code.trim()}:${expiry}`;
   const hmac = crypto.createHmac('sha256', secret).update(data).digest('hex');
   return `${expiry}.${hmac}`;
@@ -80,7 +80,7 @@ export function verifyOtpSignature(roll: string, code: string, ticket: string): 
     const expiry = parseInt(expiryStr, 10);
     if (isNaN(expiry) || Date.now() > expiry) return false;
 
-    const secret = process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'nitpy-ganga-auth-secret';
+    const secret = process.env.SESSION_SECRET || process.env.SUPABASE_JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'nitpy-ganga-auth-secret';
     const data = `${roll.toUpperCase()}:${code.trim()}:${expiry}`;
     const expected = crypto.createHmac('sha256', secret).update(data).digest('hex');
     return crypto.timingSafeEqual(Buffer.from(hmac), Buffer.from(expected));

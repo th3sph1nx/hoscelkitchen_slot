@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateRollNumber, generateAndSendOtp } from '@/lib/db';
+import { checkSendOtpRateLimit } from '@/lib/rateLimit';
 
 export async function POST(req: NextRequest) {
   try {
@@ -10,6 +11,15 @@ export async function POST(req: NextRequest) {
     }
 
     const { roll, email } = validation;
+
+    // Rate limiting: 45-second cooldown per roll number
+    const rateCheck = checkSendOtpRateLimit(roll);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        { error: `Please wait ${rateCheck.waitSeconds}s before requesting a new verification code.` },
+        { status: 429 }
+      );
+    }
 
     // Dispatch 6-digit OTP passcode via Gmail SMTP
     const dispatchResult = await generateAndSendOtp(roll);

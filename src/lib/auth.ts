@@ -13,7 +13,7 @@ const SESSION_SECRET =
   process.env.SESSION_SECRET ||
   process.env.SUPABASE_JWT_SECRET ||
   process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  'ganga-nitpy-production-session-secret-2026';
+  crypto.randomBytes(32).toString('hex');
 
 export const SESSION_COOKIE_NAME = 'ganga_session';
 

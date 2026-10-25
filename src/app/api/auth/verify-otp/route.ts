@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateRollNumber, verifyOtp } from '@/lib/db';
 import { createSessionToken, SESSION_COOKIE_NAME } from '@/lib/auth';
+import { checkVerifyOtpAttempts, recordFailedOtpAttempt, clearFailedOtpAttempts } from '@/lib/rateLimit';
 import { ADMIN_ROLL } from '@/lib/types';
 
 export async function POST(req: NextRequest) {
@@ -17,17 +18,37 @@ export async function POST(req: NextRequest) {
     }
 
     const { roll, email } = validation;
+
+    // Check brute-force lockout status
+    const attemptCheck = checkVerifyOtpAttempts(roll);
+    if (!attemptCheck.allowed) {
+      return NextResponse.json(
+        { error: 'Too many incorrect attempts. For security, verification is locked for 10 minutes. Please request a new code.' },
+        { status: 429 }
+      );
+    }
+
     const token = String(code).trim();
     const cookieTicket = req.cookies.get('ganga_otp_ticket')?.value;
     const ticket = bodyTicket || cookieTicket;
 
     const verified = await verifyOtp(roll, token, ticket);
     if (!verified) {
+      const fail = recordFailedOtpAttempt(roll);
+      if (fail.isLocked) {
+        return NextResponse.json(
+          { error: 'Maximum verification attempts exceeded. Verification locked for 10 minutes. Please request a new code.' },
+          { status: 429 }
+        );
+      }
       return NextResponse.json(
-        { error: 'Invalid or expired verification code. Please check your email and try again.' },
+        { error: `Invalid verification code. ${fail.remainingAttempts} attempt(s) remaining.` },
         { status: 401 }
       );
     }
+
+    // Clear failed attempts on successful verification
+    clearFailedOtpAttempts(roll);
 
     // Determine admin status
     const isAdmin = roll.toUpperCase() === ADMIN_ROLL;
