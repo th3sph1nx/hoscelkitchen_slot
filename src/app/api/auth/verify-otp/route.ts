@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { validateRollNumber, verifyOtp } from '@/lib/db';
+import { createSessionToken, SESSION_COOKIE_NAME } from '@/lib/auth';
+import { ADMIN_ROLL } from '@/lib/types';
 
 export async function POST(req: NextRequest) {
   try {
@@ -27,8 +29,29 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const res = NextResponse.json({ success: true, rollNumber: roll, email });
-    // Clear ticket cookie after successful verification
+    // Determine admin status
+    const isAdmin = roll.toUpperCase() === ADMIN_ROLL;
+
+    // Issue cryptographically signed session token
+    const sessionToken = createSessionToken({ roll, email, isAdmin });
+
+    const res = NextResponse.json({
+      success: true,
+      rollNumber: roll,
+      email,
+      isAdmin,
+    });
+
+    // Set HttpOnly session cookie (inaccessible to browser JS, sent automatically with API requests)
+    res.cookies.set(SESSION_COOKIE_NAME, sessionToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 7 * 24 * 60 * 60, // 7 days
+      path: '/',
+    });
+
+    // Clear one-time ticket cookie
     res.cookies.delete('ganga_otp_ticket');
     return res;
   } catch (err: any) {

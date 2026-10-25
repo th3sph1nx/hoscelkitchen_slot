@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBookings, createBooking } from '@/lib/db';
+import { getSessionUser } from '@/lib/auth';
 import { FacilityId } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -21,11 +22,20 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
-    const { facility_id, roll_number, attendees_count, start_time, end_time, purpose } = body;
+    // Enforce backend user authentication
+    const user = getSessionUser(req);
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized: Please log in to book a slot.' }, { status: 401 });
+    }
 
-    if (!facility_id || !roll_number || !start_time || !end_time) {
-      return NextResponse.json({ error: 'Missing required booking fields' }, { status: 400 });
+    const body = await req.json();
+    const { facility_id, attendees_count, start_time, end_time, purpose } = body;
+
+    // Strict backend enforcement: The booker roll number ALWAYS comes from the verified session!
+    const roll_number = user.roll;
+
+    if (!facility_id || !start_time || !end_time) {
+      return NextResponse.json({ error: 'Missing required booking fields (facility_id, start_time, end_time)' }, { status: 400 });
     }
 
     const booking = await createBooking({

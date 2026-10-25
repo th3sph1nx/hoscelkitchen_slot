@@ -2,7 +2,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { FacilityId, Booking, CurrentStatus, BlacklistEntry, CooldownEntry, ADMIN_ROLL } from '@/lib/types';
-import { supabase } from '@/lib/supabase';
 import { format, addDays } from 'date-fns';
 
 function formatBookingSchedule(startTime: string, endTime: string): { dateStr: string; timeStr: string } {
@@ -96,66 +95,34 @@ export default function Home() {
   const [editStartHour, setEditStartHour] = useState<number>(18);
   const [editEndHour, setEditEndHour] = useState<number>(20);
 
-  const isAdmin = userRoll.toUpperCase() === ADMIN_ROLL;
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
-  // Load session from localStorage AND listen for Supabase Auth Magic Link redirects
+  // Authenticate session from backend cryptographic HttpOnly cookie
   useEffect(() => {
-    // 1. Check localStorage for existing session
-    const savedRoll = localStorage.getItem('nitpy_user_roll');
-    const savedEmail = localStorage.getItem('nitpy_user_email');
-    if (savedRoll && savedEmail) {
-      setUserRoll(savedRoll);
-      setUserEmail(savedEmail);
-      setIsLoggedIn(true);
-    }
-
-    if (!supabase) return;
-
-    const handleAuthUser = (user: any) => {
-      if (!user?.email) return;
-      const email = user.email.toLowerCase();
-      const match = email.match(/^([a-z0-9]+)@nitpy\.ac\.in$/);
-      const roll = match ? match[1].toUpperCase() : email.split('@')[0].toUpperCase();
-
-      setUserRoll(roll);
-      setUserEmail(email);
-      setIsLoggedIn(true);
-      setOtpSent(false);
-      setAuthMsg({ text: `Logged in as ${roll} (${email})`, isError: false });
-      localStorage.setItem('nitpy_user_roll', roll);
-      localStorage.setItem('nitpy_user_email', email);
-
-      // Clean URL hash or search params cleanly
-      if (typeof window !== 'undefined' && (window.location.hash || window.location.search.includes('code='))) {
-        window.history.replaceState(null, '', window.location.pathname);
-      }
-    };
-
-    // 2. Listen to Supabase onAuthStateChange (when user clicks magic link in email)
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (session?.user) {
-        handleAuthUser(session.user);
-      }
-    });
-
-    // 3. Check active session or access_token in URL hash
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        handleAuthUser(session.user);
-      } else if (typeof window !== 'undefined' && window.location.hash.includes('access_token=')) {
-        const hashParams = new URLSearchParams(window.location.hash.substring(1));
-        const token = hashParams.get('access_token');
-        if (token && supabase) {
-          supabase.auth.getUser(token).then(({ data: { user } }) => {
-            if (user) handleAuthUser(user);
-          });
+    const checkSession = async () => {
+      try {
+        const res = await fetch('/api/auth/me');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.isLoggedIn && data.user) {
+            setUserRoll(data.user.roll);
+            setUserEmail(data.user.email);
+            setIsAdmin(Boolean(data.user.isAdmin));
+            setIsLoggedIn(true);
+            return;
+          }
         }
-      }
-    });
+      } catch {}
 
-    return () => {
-      authListener?.subscription?.unsubscribe();
+      // If no valid session cookie on backend, clear state
+      setIsLoggedIn(false);
+      setUserRoll('');
+      setUserEmail('');
+      setIsAdmin(false);
+      setActiveView('booker');
     };
+
+    checkSession();
   }, []);
 
   // Poll current live facility status
@@ -183,11 +150,10 @@ export default function Home() {
   const fetchAdminData = async () => {
     if (!isAdmin) return;
     try {
-      const headers = { 'x-admin-roll': ADMIN_ROLL };
       const [bRes, blRes, cdRes] = await Promise.all([
-        fetch('/api/admin/bookings', { headers }),
-        fetch('/api/admin/blacklist', { headers }),
-        fetch('/api/admin/cooldown', { headers }),
+        fetch('/api/admin/bookings'),
+        fetch('/api/admin/blacklist'),
+        fetch('/api/admin/cooldown'),
       ]);
 
       if (bRes.ok) {
@@ -343,9 +309,8 @@ export default function Home() {
 
       setUserRoll(data.rollNumber);
       setUserEmail(data.email);
+      setIsAdmin(Boolean(data.isAdmin));
       setIsLoggedIn(true);
-      localStorage.setItem('nitpy_user_roll', data.rollNumber);
-      localStorage.setItem('nitpy_user_email', data.email);
       setOtpSent(false);
       setLoginRollInput('');
       setOtpInput('');
@@ -358,16 +323,13 @@ export default function Home() {
   };
 
   const handleLogout = async () => {
-    if (supabase) {
-      try {
-        await supabase.auth.signOut();
-      } catch {}
-    }
-    localStorage.removeItem('nitpy_user_roll');
-    localStorage.removeItem('nitpy_user_email');
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {}
     setIsLoggedIn(false);
     setUserRoll('');
     setUserEmail('');
+    setIsAdmin(false);
     setOtpSent(false);
     setOtpInput('');
     setMyBookings([]);
@@ -448,16 +410,19 @@ export default function Home() {
   const handleCancelBooking = async (code: string) => {
     if (!confirm(`Cancel booking ${code}?`)) return;
     try {
-      const res = await fetch(`/api/bookings/${code}?roll_number=${userRoll}`, {
+      const res = await fetch(`/api/bookings/${code}`, {
         method: 'DELETE',
       });
       if (res.ok) {
         fetchStatus();
         fetchMyBookings();
         if (isAdmin) fetchAdminData();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Failed to cancel slot');
       }
     } catch {
-      alert('Failed to cancel');
+      alert('Failed to cancel slot');
     }
   };
 
@@ -467,7 +432,6 @@ export default function Home() {
     try {
       const res = await fetch(`/api/admin/bookings/${id}`, {
         method: 'DELETE',
-        headers: { 'x-admin-roll': ADMIN_ROLL },
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error);
@@ -490,7 +454,6 @@ export default function Home() {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-roll': ADMIN_ROLL,
         },
         body: JSON.stringify({
           start_time: newStartISO,
@@ -517,7 +480,6 @@ export default function Home() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-roll': ADMIN_ROLL,
         },
         body: JSON.stringify({
           roll_number: newBlacklistRoll.trim().toUpperCase(),
@@ -542,7 +504,6 @@ export default function Home() {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-roll': ADMIN_ROLL,
         },
         body: JSON.stringify({ roll_number: roll }),
       });
@@ -561,7 +522,6 @@ export default function Home() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-roll': ADMIN_ROLL,
         },
         body: JSON.stringify({
           roll_number: newCooldownRoll.trim().toUpperCase(),
@@ -587,7 +547,6 @@ export default function Home() {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
-          'x-admin-roll': ADMIN_ROLL,
         },
         body: JSON.stringify({ roll_number: roll }),
       });

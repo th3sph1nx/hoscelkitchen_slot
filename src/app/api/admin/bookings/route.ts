@@ -1,17 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getBookings } from '@/lib/db';
-import { ADMIN_ROLL } from '@/lib/types';
+import { verifyAdminAccess } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 
-function checkAdmin(req: NextRequest): boolean {
-  const roll = req.headers.get('x-admin-roll') || req.nextUrl.searchParams.get('admin_roll');
-  return roll?.trim().toUpperCase() === ADMIN_ROLL;
-}
-
 export async function GET(req: NextRequest) {
-  if (!checkAdmin(req)) {
-    return NextResponse.json({ error: `Unauthorized: Admin role required (${ADMIN_ROLL})` }, { status: 403 });
+  // Enforce backend cryptographic admin session verification
+  const auth = verifyAdminAccess(req);
+  if (!auth.authorized) {
+    return NextResponse.json({ error: auth.error || 'Forbidden' }, { status: 403 });
   }
 
   try {
